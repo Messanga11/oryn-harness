@@ -1,10 +1,18 @@
 """CLI entry point.
 
 Usage :
+    # Build from scratch
     oryn build "construis un uber-like avec app client et app chauffeur"
-    oryn build "..." --workdir ./my-app --budget-usd 100
-    oryn build "..." --app "client-app:mobile:App client" --app "driver-app:mobile:App chauffeur"
-    oryn build "..." --no-design-research
+
+    # Run tasks on existing project
+    oryn task "ajoute le dark mode" --workdir ./my-existing-app
+    oryn task "fix le bug de login" --workdir ./my-existing-app
+    oryn task "refactor le dashboard pour utiliser le grid 12 colonnes" --workdir ./my-app
+
+    # Multi-task
+    oryn task "ajoute dark mode" "ajoute les notifications push" "fix le bug de logout" --workdir ./my-app
+
+    # Status / Resume
     oryn status --workdir ./my-app
     oryn resume --workdir ./my-app
 """
@@ -178,6 +186,75 @@ def resume(
     loop = HarnessLoop(config)
     loop.state.write_progress(progress)
     loop.resume(progress)
+
+
+@app.command()
+def task(
+    tasks: list[str] = typer.Argument(..., help="Tâche(s) à effectuer sur le projet existant"),
+    workdir: Path = typer.Option(Path("."), help="Répertoire du projet existant"),
+    # Models
+    generator_model: str = typer.Option("claude-sonnet-4-6"),
+    evaluator_model: str = typer.Option("claude-opus-4-7"),
+    # Limites
+    budget_usd: float = typer.Option(500.0, help="Budget max en USD"),
+    max_iterations: int = typer.Option(500, help="Max itérations totales"),
+    max_per_sprint: int = typer.Option(10, help="Max itérations par tâche"),
+    pass_threshold: float = typer.Option(0.75, help="Score min pour passer"),
+):
+    """Exécute des tâches sur un projet existant (pas de build from scratch)."""
+    from datetime import datetime
+    from .state import Sprint, ProgressState
+
+    if not workdir.exists():
+        console.print(f"[red]Le dossier {workdir} n'existe pas[/red]")
+        raise typer.Exit(1)
+
+    # Créer un sprint par tâche
+    sprints = []
+    for i, t in enumerate(tasks):
+        sprints.append(Sprint(
+            id=f"task-{i:02d}",
+            title=t[:80],
+            description=t,
+            target_apps=["all"],
+        ))
+
+    config = HarnessConfig(
+        user_prompt=" | ".join(tasks),
+        workdir=workdir,
+        generator_model=generator_model,
+        evaluator_model=evaluator_model,
+        budget_usd=budget_usd,
+        max_total_iterations=max_iterations,
+        max_iterations_per_sprint=max_per_sprint,
+        pass_threshold=pass_threshold,
+        enable_design_research=False,
+    )
+
+    loop = HarnessLoop(config)
+
+    progress = ProgressState(
+        started_at=datetime.now(),
+        user_prompt=config.user_prompt,
+        sprints=sprints,
+        total_cost_usd=0.0,
+    )
+    loop.state.write_progress(progress)
+
+    console.print(Panel.fit(
+        f"[bold cyan]oryn task[/bold cyan]\n"
+        f"workdir : {workdir.resolve()}\n"
+        f"{len(sprints)} tâche(s) à effectuer",
+        title="Mode tâche",
+    ))
+    for s in sprints:
+        console.print(f"  • [bold]{s.id}[/bold] — {s.title}")
+
+    loop._run_sprints(progress)
+
+    # Summary
+    passed = sum(1 for s in progress.sprints if s.status == SprintStatus.PASSED)
+    console.print(f"\n[bold]{passed}/{len(sprints)} tâches terminées[/bold] — ${progress.total_cost_usd:.2f}")
 
 
 if __name__ == "__main__":
