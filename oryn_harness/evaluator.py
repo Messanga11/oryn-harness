@@ -1,8 +1,18 @@
-"""Agent EVALUATOR : critique le travail du Generator avec tests complets."""
+"""Agent EVALUATOR : critique le travail du Generator avec tests complets.
+
+Le harness lance les apps et capture les preuves AVANT d'appeler l'Evaluator.
+L'Evaluator reçoit les screenshots, logs, et résultats de tests comme contexte
+factuel — pas besoin de lui faire confiance pour lancer les apps.
+"""
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
+import subprocess
+import time
+from pathlib import Path
 from typing import Literal
 
 from rich.console import Console
@@ -17,8 +27,343 @@ console = Console()
 Verdict = Literal["PASS", "NEEDS_FIX", "REQUEST_RESTART"]
 
 
+class AppRunner:
+    """Lance les apps et capture les preuves (screenshots, logs, tests)."""
+
+    def __init__(self, workdir: Path):
+        self.workdir = workdir
+        self.evidence_dir = workdir / ".oryn" / "evidence"
+        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        self._procs: list[subprocess.Popen] = []
+
+    def collect_evidence(self) -> dict:
+        """Lance les apps, capture tout, retourne un résumé."""
+        evidence: dict = {
+            "web": {},
+            "mobile": {},
+            "tests": {},
+            "security": {},
+        }
+
+        # 1. Web app
+        if (self.workdir / "apps" / "web").exists():
+            evidence["web"] = self._test_web()
+
+        # 2. Mobile app
+        if (self.workdir / "apps" / "mobile").exists():
+            evidence["mobile"] = self._test_mobile()
+
+        # 3. Unit tests
+        evidence["tests"]["unit"] = self._run_unit_tests()
+
+        # 4. Security
+        evidence["security"]["npm_audit"] = self._run_npm_audit()
+
+        # Cleanup
+        self._kill_all()
+
+        return evidence
+
+    def _test_web(self) -> dict:
+        """Lance l'app web, screenshot, capture logs."""
+        result: dict = {"launched": False, "logs": "", "screenshots": [], "errors": []}
+
+        console.print("[blue]  Lancement app web...[/blue]")
+
+        # Lancer pnpm dev en background
+        web_dir = self.workdir / "apps" / "web"
+        try:
+            proc = subprocess.Popen(
+                ["pnpm", "dev"],
+                cwd=str(web_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            self._procs.append(proc)
+        except FileNotFoundError:
+            result["errors"].append("pnpm not found")
+            return result
+
+        # Attendre que le serveur démarre (max 30s)
+        logs_lines: list[str] = []
+        started = False
+        start_time = time.time()
+
+        while time.time() - start_time < 30:
+            if proc.poll() is not None:
+                # Process died
+                remaining = proc.stdout.read() if proc.stdout else ""
+                logs_lines.append(remaining)
+                result["errors"].append(f"Web server crashed: {remaining[-500:]}")
+                break
+
+            line = ""
+            try:
+                line = proc.stdout.readline() if proc.stdout else ""
+            except Exception:
+                pass
+
+            if line:
+                logs_lines.append(line.rstrip())
+                console.print(f"  [dim]{line.rstrip()[:120]}[/dim]")
+
+                # Détecter que le serveur est prêt
+                lower = line.lower()
+                if any(kw in lower for kw in ["ready", "listening", "localhost:", "started", "http://"]):
+                    started = True
+                    break
+
+                if any(kw in lower for kw in ["error", "failed", "cannot"]):
+                    result["errors"].append(line.rstrip())
+
+        result["logs"] = "\n".join(logs_lines[-50:])  # Dernières 50 lignes
+
+        if not started:
+            result["errors"].append("Web server did not start within 30s")
+            console.print("[red]  Web server failed to start[/red]")
+            return result
+
+        result["launched"] = True
+        console.print("[green]  Web server started[/green]")
+
+        # Attendre un peu que l'app soit stable
+        time.sleep(3)
+
+        # Screenshot avec Playwright
+        for page_name, url in [("home", "http://localhost:3000"), ("login", "http://localhost:3000/login")]:
+            screenshot_path = self.evidence_dir / f"web_{page_name}.png"
+            console_log = self._playwright_screenshot(url, str(screenshot_path))
+            if screenshot_path.exists():
+                result["screenshots"].append(str(screenshot_path))
+                console.print(f"  [green]  Screenshot: {page_name}[/green]")
+            if console_log:
+                result[f"console_{page_name}"] = console_log
+
+        # Curl check
+        try:
+            resp = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:3000"],
+                capture_output=True, text=True, timeout=10,
+            )
+            result["http_status"] = resp.stdout.strip()
+            console.print(f"  [dim]  HTTP {result['http_status']}[/dim]")
+        except Exception:
+            result["http_status"] = "error"
+
+        return result
+
+    def _test_mobile(self) -> dict:
+        """Lance l'app mobile sur émulateur Android, capture logs."""
+        result: dict = {"launched": False, "logs": "", "errors": [], "emulator": False}
+
+        console.print("[blue]  Lancement app mobile...[/blue]")
+
+        # Check si un emulateur Android tourne
+        try:
+            adb_out = subprocess.run(
+                ["adb", "devices"], capture_output=True, text=True, timeout=5,
+            )
+            if "emulator" in adb_out.stdout:
+                result["emulator"] = True
+                console.print("[green]  Emulateur Android détecté[/green]")
+            else:
+                # Essayer de lancer un emulateur
+                console.print("[yellow]  Pas d'émulateur, tentative de lancement...[/yellow]")
+                avd_out = subprocess.run(
+                    ["emulator", "-list-avds"], capture_output=True, text=True, timeout=5,
+                )
+                avds = [a.strip() for a in avd_out.stdout.strip().split("\n") if a.strip()]
+                if avds:
+                    console.print(f"  [dim]  AVD trouvé: {avds[0]}[/dim]")
+                    emu_proc = subprocess.Popen(
+                        ["emulator", f"@{avds[0]}", "-no-window", "-no-audio", "-no-boot-anim"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    self._procs.append(emu_proc)
+                    # Attendre le boot
+                    console.print("  [dim]  Attente boot émulateur...[/dim]")
+                    subprocess.run(["adb", "wait-for-device"], timeout=60)
+                    time.sleep(10)  # Laisser le temps au boot
+                    result["emulator"] = True
+                    console.print("[green]  Emulateur Android démarré[/green]")
+                else:
+                    result["errors"].append("Aucun AVD Android trouvé. Créer via Android Studio > Device Manager")
+                    console.print("[yellow]  Pas d'AVD disponible, skip mobile[/yellow]")
+                    return result
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            result["errors"].append("adb/emulator not found or timeout")
+            console.print("[yellow]  adb/emulator non disponible, skip mobile[/yellow]")
+            return result
+
+        # Lancer Expo
+        mobile_dir = self.workdir / "apps" / "mobile"
+        try:
+            proc = subprocess.Popen(
+                ["npx", "expo", "start", "--android", "--no-dev"],
+                cwd=str(mobile_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            self._procs.append(proc)
+        except FileNotFoundError:
+            result["errors"].append("npx not found")
+            return result
+
+        # Capturer les logs Expo (30s)
+        logs_lines: list[str] = []
+        start_time = time.time()
+
+        while time.time() - start_time < 30:
+            if proc.poll() is not None:
+                remaining = proc.stdout.read() if proc.stdout else ""
+                logs_lines.append(remaining)
+                break
+
+            line = ""
+            try:
+                line = proc.stdout.readline() if proc.stdout else ""
+            except Exception:
+                pass
+
+            if line:
+                logs_lines.append(line.rstrip())
+                console.print(f"  [dim]{line.rstrip()[:120]}[/dim]")
+
+                lower = line.lower()
+                if any(kw in lower for kw in ["error", "failed", "cannot", "red screen"]):
+                    result["errors"].append(line.rstrip())
+
+                if any(kw in lower for kw in ["bundled", "running", "open on", "started"]):
+                    result["launched"] = True
+
+        result["logs"] = "\n".join(logs_lines[-50:])
+
+        # Capturer logcat
+        if result["emulator"]:
+            try:
+                logcat = subprocess.run(
+                    ["adb", "logcat", "-d", "-s", "ReactNativeJS:*", "ReactNative:*"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                result["logcat"] = logcat.stdout[-2000:]  # Derniers 2000 chars
+                # Chercher les erreurs
+                for line in logcat.stdout.split("\n"):
+                    if "error" in line.lower() or "fatal" in line.lower():
+                        result["errors"].append(f"logcat: {line.strip()}")
+            except Exception:
+                pass
+
+        if result["launched"]:
+            console.print("[green]  App mobile lancée sur émulateur[/green]")
+        else:
+            console.print("[yellow]  App mobile: lancement incertain[/yellow]")
+
+        return result
+
+    def _run_unit_tests(self) -> dict:
+        """Lance les tests unitaires."""
+        result: dict = {"output": "", "pass_count": 0, "fail_count": 0, "ran": False}
+
+        console.print("[blue]  Unit tests...[/blue]")
+
+        try:
+            proc = subprocess.run(
+                ["pnpm", "turbo", "test", "--", "--reporter=verbose"],
+                cwd=str(self.workdir),
+                capture_output=True, text=True, timeout=120,
+            )
+            result["output"] = proc.stdout[-3000:] + "\n" + proc.stderr[-1000:]
+            result["ran"] = True
+
+            # Compter pass/fail
+            for line in proc.stdout.split("\n"):
+                if "✓" in line or "✅" in line or " pass" in line.lower():
+                    result["pass_count"] += 1
+                if "✗" in line or "❌" in line or " fail" in line.lower():
+                    result["fail_count"] += 1
+
+            console.print(f"  [dim]  {result['pass_count']} pass, {result['fail_count']} fail[/dim]")
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            result["output"] = str(e)
+            console.print(f"  [yellow]  Tests: {e}[/yellow]")
+
+        return result
+
+    def _run_npm_audit(self) -> dict:
+        """Lance npm audit."""
+        result: dict = {"output": "", "critical": 0, "high": 0}
+
+        console.print("[blue]  npm audit...[/blue]")
+
+        try:
+            proc = subprocess.run(
+                ["pnpm", "audit", "--json"],
+                cwd=str(self.workdir),
+                capture_output=True, text=True, timeout=30,
+            )
+            result["output"] = proc.stdout[-2000:]
+            try:
+                audit = json.loads(proc.stdout)
+                vuln = audit.get("metadata", {}).get("vulnerabilities", {})
+                result["critical"] = vuln.get("critical", 0)
+                result["high"] = vuln.get("high", 0)
+            except (json.JSONDecodeError, KeyError):
+                pass
+            console.print(f"  [dim]  critical={result['critical']}, high={result['high']}[/dim]")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return result
+
+    def _playwright_screenshot(self, url: str, output: str) -> str:
+        """Prend un screenshot avec Playwright et retourne les logs console."""
+        script = self.workdir / ".oryn" / "scripts" / "pw_check.py"
+        if not script.exists():
+            return ""
+
+        try:
+            proc = subprocess.run(
+                ["python3", str(script), url, "--screenshot", output, "--dump-console"],
+                capture_output=True, text=True, timeout=20,
+            )
+            return proc.stdout[-2000:]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return ""
+
+    def _kill_all(self) -> None:
+        """Kill tous les processus lancés."""
+        for proc in self._procs:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        # Safety: kill pnpm dev et expo start
+        for pattern in ["pnpm dev", "expo start", "metro"]:
+            try:
+                subprocess.run(
+                    ["pkill", "-f", pattern],
+                    capture_output=True, timeout=5,
+                )
+            except Exception:
+                pass
+
+        self._procs.clear()
+
+
 class Evaluator:
-    """Critique adversariale d'un sprint avec tests complets."""
+    """Critique adversariale d'un sprint avec tests complets.
+
+    Le harness lance les apps et capture les preuves AVANT d'appeler
+    l'Evaluator Claude. L'Evaluator reçoit les screenshots, logs,
+    et résultats comme FAITS, pas comme suggestions.
+    """
 
     def __init__(self, config: HarnessConfig, state: StateManager):
         self.config = config
@@ -38,60 +383,42 @@ class Evaluator:
         iteration: int,
         generator_output: str,
     ) -> tuple[Verdict, RubricScore | None, ClaudeResult]:
-        """Évalue le travail du Generator et retourne verdict + scores."""
+        """Lance les apps, capture les preuves, puis évalue."""
         console.rule(f"[bold red]EVALUATOR — sprint {sprint.id} iter {iteration}")
 
-        # Check si des références design existent
+        # Phase 1 : Le HARNESS lance les apps et capture les preuves
+        console.print("[bold]Phase 1 : Lancement des apps et capture des preuves[/bold]")
+        app_runner = AppRunner(self.config.workdir)
+        evidence = app_runner.collect_evidence()
+
+        # Construire le rapport de preuves pour l'Evaluator
+        evidence_report = self._build_evidence_report(evidence)
+
+        # Phase 2 : L'Evaluator Claude analyse les preuves
+        console.print("[bold]Phase 2 : Analyse par l'Evaluator[/bold]")
+
         refs_dir = self.config.workdir / ".oryn" / "references"
         has_references = (refs_dir / "design_brief.md").exists()
 
         references_instruction = ""
         if has_references:
             references_instruction = (
-                "4. `.oryn/references/design_brief.md` — compare le résultat aux apps de référence\n"
-                "5. Les screenshots dans `.oryn/references/` — LIS-LES pour comparer visuellement"
+                "- `.oryn/references/design_brief.md` — compare le résultat aux apps de référence\n"
+                "- Les screenshots dans `.oryn/references/` — LIS-LES pour comparer visuellement"
             )
 
-        # Info sur les apps
-        apps = self.state.read_apps()
-        apps_info = ""
-        if apps:
-            apps_lines = [f"  - {a.name} ({a.platform})" for a in apps]
-            apps_info = f"Ce projet a {len(apps)} apps : {', '.join(a.name for a in apps)}"
-
-        # Test config
-        test_cfg = self.config.tests
-        test_instructions = f"""
-# Tests à exécuter
-1. `pnpm turbo test` (Vitest unit tests)
-2. `pnpm turbo test:e2e --filter=web` (Playwright E2E, si app web)
-3. `.oryn/scripts/maestro_helper.sh android` (Maestro mobile E2E, si app mobile)
-4. `.oryn/scripts/lighthouse_helper.sh http://localhost:3000` (Lighthouse, si app web)
-   - Seuils : Perf ≥ {test_cfg.lighthouse_perf_threshold}, A11y ≥ {test_cfg.lighthouse_a11y_threshold}
-5. `.oryn/scripts/security_scan.sh http://localhost:3000` (Sécurité)
-   - 0 critical, 0 high vulns
-"""
+        # Screenshots capturés
+        screenshots_instruction = ""
+        screenshots = evidence.get("web", {}).get("screenshots", [])
+        if screenshots:
+            screenshots_instruction = "## Screenshots capturés par le harness\nLIS ces images :\n"
+            for s in screenshots:
+                screenshots_instruction += f"- `{s}`\n"
 
         stack = self.config.stack
-        arch_check = f"""
-# Vérifications d'architecture OBLIGATOIRES
-- [ ] packages/ui/ contient les composants de base (Box, Typography, Grid, Row, Column, Button, etc.)
-- [ ] ZÉRO <div>/<View>/<p>/<h1> dans apps/ ou packages/features/ — tout via @oryn/ui
-- [ ] packages/features/ suit la structure feature-based (components/ + hooks/ + services/)
-- [ ] Les routes web importent depuis @repo/features (pas de logique dans apps/web/)
-- [ ] Les routes mobile importent depuis @repo/features (mêmes composants que web)
-- [ ] Le grid fonctionne : {stack.web_grid_columns} colonnes web, {stack.mobile_grid_columns} colonnes mobile
-- [ ] NativeWind est utilisé pour le styling (pas de StyleSheet.create inline)
-- [ ] Les tests sont co-localisés (.test.ts dans le même dossier)
-- [ ] UpdateGate wraps le root layout de CHAQUE app (force update comme WhatsApp)
-- [ ] Table appVersions existe dans le schema Convex
-- [ ] Blocks CMS enregistrés dans BLOCK_REGISTRY + BlockRenderer fonctionnel
-"""
-
         prompt = f"""Mode : ÉVALUATION.
 
 Tu évalues le sprint **{sprint.id} — {sprint.title}**, itération {iteration}.
-{apps_info}
 
 Lis dans l'ordre :
 1. `.oryn/spec.md` (vision)
@@ -99,101 +426,35 @@ Lis dans l'ordre :
 3. `.oryn/contracts/sprint_{sprint.id}.md` (le contrat — c'est la référence)
 {references_instruction}
 
+{screenshots_instruction}
+
 # Résumé du Generator
 ```
 {generator_output[:3000]}
 ```
 
-{test_instructions}
+# PREUVES FACTUELLES (capturées par le harness, pas par toi)
+Le harness a lancé les apps et capturé les résultats suivants.
+Ce sont des FAITS. Utilise-les pour ton évaluation.
 
-{arch_check}
+{evidence_report}
 
-# Ta mission — OBLIGATOIRE, dans cet ordre
+# Vérifications d'architecture OBLIGATOIRES
+- [ ] packages/ui/ contient les composants de base (Box, Typography, Grid, etc.)
+- [ ] ZÉRO <div>/<View>/<p>/<h1> dans apps/ ou packages/features/
+- [ ] packages/features/ suit la structure feature-based
+- [ ] Le grid fonctionne : {stack.web_grid_columns} colonnes web, {stack.mobile_grid_columns} colonnes mobile
+- [ ] UpdateGate dans le root layout de CHAQUE app
+- [ ] Blocks CMS dans BLOCK_REGISTRY
 
-## Étape 1 : LANCER les apps (OBLIGATOIRE)
-Tu DOIS lancer les apps et vérifier qu'elles tournent. Pas de review sans lancer.
-
-### App web (TanStack Start)
-```bash
-# Lancer en FOREGROUND — tu vois les logs en direct dans stdout
-cd apps/web && pnpm dev
-```
-Attends que le serveur soit prêt (tu verras "ready" ou "listening on" dans les logs).
-Puis dans un AUTRE appel Bash :
-```bash
-# Screenshot + console du navigateur
-python .oryn/scripts/pw_check.py http://localhost:3000 --screenshot /tmp/eval_web_home.png --dump-console
-```
-
-### App mobile (Expo) — lancer dans l'émulateur
-```bash
-# Android : démarrer l'émulateur si pas déjà running
-if ! adb devices 2>/dev/null | grep -q "emulator"; then
-    AVDS=$(emulator -list-avds 2>/dev/null | head -1)
-    if [ -n "$AVDS" ]; then
-        emulator @"$AVDS" -no-window -no-audio &
-        sleep 15
-        adb wait-for-device
-    fi
-fi
-
-# Lancer Expo en FOREGROUND — tu vois les logs Metro + React Native en direct
-cd apps/mobile && npx expo start --android
-```
-Tu verras les logs Metro bundler, les erreurs de build, les erreurs JS React Native
-directement dans stdout. Red screen = erreur visible dans les logs.
-
-Pour iOS :
-```bash
-xcrun simctl boot "iPhone 16 Pro" 2>/dev/null
-cd apps/mobile && npx expo start --ios
-```
-
-Tu DOIS lancer au moins UNE des deux plateformes (Android ou iOS).
-
-### Logcat Android (dans un autre Bash, pour les logs runtime)
-```bash
-# Voir les erreurs JS React Native en temps réel
-adb logcat -s ReactNativeJS:* ReactNative:* ExpoModulesCore:*
-```
-
-## Étape 2 : TESTER visuellement + lire les logs en direct
-- Les logs défilent en stdout — LIS-LES. Chaque erreur, warning, crash est visible.
-- Screenshot chaque écran important avec Playwright (web)
-- Clique sur les boutons, remplis les formulaires, vérifie que ça fonctionne
-- Si tu vois une erreur dans les logs → cite-la EXACTEMENT dans ta critique
-- Si l'app crash au lancement → c'est un FAIL immédiat, pas besoin de tester plus
-
-## Étape 3 : Tests automatisés
-- `pnpm turbo test` (unit tests)
-- `pnpm turbo test:e2e --filter=web` (Playwright E2E si configuré)
-- `.oryn/scripts/maestro_helper.sh android` (Maestro si flows existent)
-- `.oryn/scripts/lighthouse_helper.sh http://localhost:3000` (Lighthouse)
-- `npm audit` (sécurité)
-
-## Étape 4 : Vérifier le contrat
-- Vérifie CHAQUE critère du contrat un par un
-- Vérifie l'architecture (packages/ui/, packages/features/, imports)
-
-## Étape 5 : Écrire la critique
-- Écris dans `.oryn/critiques/sprint_{sprint.id}_iter_{iteration:03d}.md`
-
-## Étape 6 : Kill les serveurs
-```bash
-# Nettoyer les processus lancés
-pkill -f "pnpm dev" 2>/dev/null || true
-pkill -f "expo start" 2>/dev/null || true
-```
-
-# RAPPEL : tu es adversarial
-{"- COMPARE le résultat aux screenshots de référence. Le design doit être AU NIVEAU." if has_references else ""}
-- Bouton sans action → FAIL
-- API retourne 200 mais payload vide → FAIL
-- Design générique Inter/ombre douce → originality ≤ 3
-- Composant dans apps/ au lieu de packages/ui/ → ARCH FAIL
-- Feature pas dans packages/features/ → ARCH FAIL
-- Tests manquants → tests ≤ 3
-- npm audit avec critical/high → security ≤ 3
+# Ta mission
+1. LIS les screenshots capturés (si disponibles)
+2. Analyse les logs et erreurs ci-dessus
+3. Vérifie CHAQUE critère du contrat
+4. Vérifie l'architecture
+5. Écris ta critique dans `.oryn/critiques/sprint_{sprint.id}_iter_{iteration:03d}.md`
+6. Si l'app crash au lancement (voir logs) → NEEDS_FIX immédiat
+7. Si les tests unitaires échouent → cite les erreurs exactes
 
 # Output OBLIGATOIRE
 ```
@@ -219,6 +480,73 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
         console.print(f"[bold]Verdict :[/bold] {verdict}")
 
         return verdict, scores, result
+
+    def _build_evidence_report(self, evidence: dict) -> str:
+        """Construit un rapport texte des preuves pour l'Evaluator."""
+        lines: list[str] = []
+
+        # Web
+        web = evidence.get("web", {})
+        if web:
+            lines.append("## App Web")
+            lines.append(f"- Lancée : {'OUI' if web.get('launched') else 'NON'}")
+            lines.append(f"- HTTP status : {web.get('http_status', 'N/A')}")
+
+            if web.get("errors"):
+                lines.append("- ERREURS :")
+                for e in web["errors"][:10]:
+                    lines.append(f"  - {e[:200]}")
+
+            if web.get("logs"):
+                lines.append("- Logs serveur (dernières lignes) :")
+                lines.append(f"```\n{web['logs'][-1500:]}\n```")
+
+            if web.get("console_home"):
+                lines.append("- Console browser (home) :")
+                lines.append(f"```\n{web['console_home'][-1000:]}\n```")
+
+        # Mobile
+        mobile = evidence.get("mobile", {})
+        if mobile:
+            lines.append("\n## App Mobile")
+            lines.append(f"- Émulateur : {'OUI' if mobile.get('emulator') else 'NON'}")
+            lines.append(f"- Lancée : {'OUI' if mobile.get('launched') else 'NON'}")
+
+            if mobile.get("errors"):
+                lines.append("- ERREURS :")
+                for e in mobile["errors"][:10]:
+                    lines.append(f"  - {e[:200]}")
+
+            if mobile.get("logs"):
+                lines.append("- Logs Expo :")
+                lines.append(f"```\n{mobile['logs'][-1500:]}\n```")
+
+            if mobile.get("logcat"):
+                lines.append("- Logcat Android :")
+                lines.append(f"```\n{mobile['logcat'][-1000:]}\n```")
+
+        # Tests
+        tests = evidence.get("tests", {})
+        unit = tests.get("unit", {})
+        if unit.get("ran"):
+            lines.append("\n## Unit Tests")
+            lines.append(f"- Pass : {unit.get('pass_count', 0)}")
+            lines.append(f"- Fail : {unit.get('fail_count', 0)}")
+            if unit.get("output"):
+                lines.append(f"```\n{unit['output'][-2000:]}\n```")
+
+        # Security
+        sec = evidence.get("security", {})
+        audit = sec.get("npm_audit", {})
+        if audit:
+            lines.append("\n## Sécurité")
+            lines.append(f"- npm audit critical : {audit.get('critical', '?')}")
+            lines.append(f"- npm audit high : {audit.get('high', '?')}")
+
+        if not lines:
+            return "Aucune preuve capturée (pas d'apps trouvées dans apps/web ou apps/mobile)."
+
+        return "\n".join(lines)
 
     def _parse_evaluator_output(self, text: str) -> tuple[Verdict, RubricScore | None]:
         """Parse les lignes VERDICT et SCORES_JSON de la sortie."""
