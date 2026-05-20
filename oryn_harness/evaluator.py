@@ -108,13 +108,67 @@ Lis dans l'ordre :
 
 {arch_check}
 
-# Ta mission
-1. Lance l'app selon les `TEST_INSTRUCTIONS_FOR_EVALUATOR` du Generator.
-2. Exécute les tests automatisés (unit, e2e, Lighthouse, sécurité).
-3. Utilise `python .oryn/scripts/pw_check.py` pour tester manuellement si c'est une webapp.
-4. Vérifie CHAQUE critère du contrat un par un.
-5. Vérifie l'architecture (packages/ui/, packages/features/, imports corrects).
-6. Écris ta critique dans `.oryn/critiques/sprint_{sprint.id}_iter_{iteration:03d}.md`.
+# Ta mission — OBLIGATOIRE, dans cet ordre
+
+## Étape 1 : LANCER les apps (OBLIGATOIRE)
+Tu DOIS lancer les apps et vérifier qu'elles tournent. Pas de review sans lancer.
+
+### App web (TanStack Start)
+```bash
+cd apps/web && pnpm dev &
+sleep 5
+# Vérifier que le serveur répond
+curl -s -o /dev/null -w "%{{http_code}}" http://localhost:3000
+# Screenshot de la home
+python .oryn/scripts/pw_check.py http://localhost:3000 --screenshot /tmp/eval_web_home.png
+```
+
+### App mobile (Expo) — lancer dans l'émulateur
+```bash
+# Android : démarrer l'émulateur si pas déjà running
+if ! adb devices 2>/dev/null | grep -q "emulator"; then
+    AVDS=$(emulator -list-avds 2>/dev/null | head -1)
+    if [ -n "$AVDS" ]; then
+        emulator @"$AVDS" -no-window -no-audio &
+        sleep 15
+        adb wait-for-device
+    fi
+fi
+# Lancer l'app Expo sur l'émulateur
+cd apps/mobile && npx expo start --android &
+sleep 10
+# Ou iOS simulator
+# xcrun simctl boot "iPhone 16 Pro" 2>/dev/null
+# cd apps/mobile && npx expo start --ios &
+```
+Tu DOIS lancer au moins UNE des deux plateformes (Android ou iOS).
+Si l'émulateur n'est pas dispo, lance au moins `npx expo start` et vérifie les logs.
+
+## Étape 2 : TESTER visuellement
+- Screenshot chaque écran important avec Playwright (web) ou l'émulateur (mobile)
+- Clique sur les boutons, remplis les formulaires, vérifie que ça fonctionne
+- Vérifie le responsive (mobile viewport sur web)
+
+## Étape 3 : Tests automatisés
+- `pnpm turbo test` (unit tests)
+- `pnpm turbo test:e2e --filter=web` (Playwright E2E si configuré)
+- `.oryn/scripts/maestro_helper.sh android` (Maestro si flows existent)
+- `.oryn/scripts/lighthouse_helper.sh http://localhost:3000` (Lighthouse)
+- `npm audit` (sécurité)
+
+## Étape 4 : Vérifier le contrat
+- Vérifie CHAQUE critère du contrat un par un
+- Vérifie l'architecture (packages/ui/, packages/features/, imports)
+
+## Étape 5 : Écrire la critique
+- Écris dans `.oryn/critiques/sprint_{sprint.id}_iter_{iteration:03d}.md`
+
+## Étape 6 : Kill les serveurs
+```bash
+# Nettoyer les processus lancés
+pkill -f "pnpm dev" 2>/dev/null || true
+pkill -f "expo start" 2>/dev/null || true
+```
 
 # RAPPEL : tu es adversarial
 {"- COMPARE le résultat aux screenshots de référence. Le design doit être AU NIVEAU." if has_references else ""}
