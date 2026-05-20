@@ -115,12 +115,23 @@ Tu DOIS lancer les apps et vérifier qu'elles tournent. Pas de review sans lance
 
 ### App web (TanStack Start)
 ```bash
-cd apps/web && pnpm dev &
+# Lancer avec logs redirigés pour analyse
+cd apps/web && pnpm dev > /tmp/eval_web_server.log 2>&1 &
+WEB_PID=$!
 sleep 5
+
 # Vérifier que le serveur répond
-curl -s -o /dev/null -w "%{{http_code}}" http://localhost:3000
+HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" http://localhost:3000)
+echo "Web server HTTP: $HTTP_CODE"
+
+# Capturer les logs serveur
+cat /tmp/eval_web_server.log
+
 # Screenshot de la home
-python .oryn/scripts/pw_check.py http://localhost:3000 --screenshot /tmp/eval_web_home.png
+python .oryn/scripts/pw_check.py http://localhost:3000 --screenshot /tmp/eval_web_home.png --dump-console --dump-html > /tmp/eval_web_console.log 2>&1
+
+# Lire les logs console du navigateur (erreurs JS, warnings, network errors)
+cat /tmp/eval_web_console.log
 ```
 
 ### App mobile (Expo) — lancer dans l'émulateur
@@ -134,20 +145,38 @@ if ! adb devices 2>/dev/null | grep -q "emulator"; then
         adb wait-for-device
     fi
 fi
-# Lancer l'app Expo sur l'émulateur
-cd apps/mobile && npx expo start --android &
-sleep 10
-# Ou iOS simulator
+
+# Lancer l'app Expo avec logs
+cd apps/mobile && npx expo start --android > /tmp/eval_mobile_expo.log 2>&1 &
+MOBILE_PID=$!
+sleep 15
+
+# Lire les logs Expo (build errors, runtime errors, warnings)
+cat /tmp/eval_mobile_expo.log
+
+# Capturer les logs Android (logcat) pour voir les crashes/erreurs JS
+adb logcat -d -s ReactNativeJS:* ReactNative:* > /tmp/eval_mobile_logcat.log 2>/dev/null
+cat /tmp/eval_mobile_logcat.log | tail -50
+
+# iOS alternative :
 # xcrun simctl boot "iPhone 16 Pro" 2>/dev/null
-# cd apps/mobile && npx expo start --ios &
+# cd apps/mobile && npx expo start --ios > /tmp/eval_mobile_expo.log 2>&1 &
+# sleep 15 && cat /tmp/eval_mobile_expo.log
 ```
 Tu DOIS lancer au moins UNE des deux plateformes (Android ou iOS).
 Si l'émulateur n'est pas dispo, lance au moins `npx expo start` et vérifie les logs.
 
-## Étape 2 : TESTER visuellement
+## Étape 2 : TESTER visuellement + analyser les logs
 - Screenshot chaque écran important avec Playwright (web) ou l'émulateur (mobile)
 - Clique sur les boutons, remplis les formulaires, vérifie que ça fonctionne
 - Vérifie le responsive (mobile viewport sur web)
+- **LIRE LES LOGS** : tu DOIS analyser les logs pour trouver :
+  - Erreurs JS console (web) : `cat /tmp/eval_web_console.log`
+  - Erreurs serveur (web) : `cat /tmp/eval_web_server.log`
+  - Erreurs React Native (mobile) : `cat /tmp/eval_mobile_logcat.log`
+  - Erreurs Expo build (mobile) : `cat /tmp/eval_mobile_expo.log`
+  - Si tu trouves des erreurs dans les logs, cite-les EXACTEMENT dans ta critique
+  - Pas d'erreur dans les logs = bon signe, mentionne-le aussi
 
 ## Étape 3 : Tests automatisés
 - `pnpm turbo test` (unit tests)
