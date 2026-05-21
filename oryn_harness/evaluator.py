@@ -16,7 +16,7 @@ from rich.console import Console
 
 from .claude_runner import ClaudeResult, ClaudeRunner
 from .config import HarnessConfig
-from .infra import InfraManager
+from .infra import InfraManager, get_web_base_url
 from .lessons import extract_lessons_from_critique
 from .prompts import EVALUATOR_PROMPT
 from .state import RubricScore, Sprint, StateManager
@@ -532,11 +532,11 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
                 urls_to_check = gen_report.get("urls_tested", [])
                 if not urls_to_check:
                     # Fallback : URLs par défaut + sprint-aware
-                    urls_to_check = [{"name": "home", "url": "http://localhost:3000"}]
+                    urls_to_check = [{"name": "home", "url": get_web_base_url(self.config.workdir)}]
 
                 for url_info in urls_to_check:
                     name = url_info.get("name", "page")
-                    url = url_info.get("url", "http://localhost:3000")
+                    url = url_info.get("url", get_web_base_url(self.config.workdir))
                     path = evidence_dir / f"eval_{sprint.id}_{name}.png"
                     self._playwright_screenshot(url, str(path))
                     if path.exists():
@@ -697,7 +697,7 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
 import json, sys
 from playwright.sync_api import sync_playwright
 
-url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:3000"
+url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:3000"  # fallback, real URL passed as arg
 
 with sync_playwright() as pw:
     browser = pw.chromium.launch(headless=True)
@@ -730,7 +730,7 @@ with sync_playwright() as pw:
 """
         try:
             proc = subprocess.run(
-                ["python3", "-c", axe_script, "http://localhost:3000"],
+                ["python3", "-c", axe_script, get_web_base_url(self.config.workdir)],
                 capture_output=True, text=True, timeout=30,
             )
             if proc.stdout.strip():

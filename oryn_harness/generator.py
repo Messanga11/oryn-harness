@@ -16,7 +16,7 @@ from rich.console import Console
 
 from .claude_runner import ClaudeResult, ClaudeRunner
 from .config import HarnessConfig
-from .infra import InfraManager
+from .infra import InfraManager, get_web_base_url
 from .lessons import get_lessons_for_prompt
 from .prompts import GENERATOR_PROMPT
 from .state import Sprint, StateManager
@@ -167,7 +167,8 @@ class Generator:
 
     def _get_sprint_urls(self, sprint: Sprint) -> list[tuple[str, str]]:
         """Détermine les URLs à screenshot en fonction du sprint."""
-        urls: list[tuple[str, str]] = [("home", "http://localhost:3000")]
+        base = get_web_base_url(self.config.workdir)
+        urls: list[tuple[str, str]] = [("home", base)]
 
         sid = sprint.id.lower()
         title = sprint.title.lower()
@@ -202,7 +203,7 @@ class Generator:
         for keyword, routes in route_hints.items():
             if keyword in text:
                 for name, path in routes:
-                    urls.append((name, f"http://localhost:3000{path}"))
+                    urls.append((name, f"{base}{path}"))
 
         # Dédupliquer
         seen = set()

@@ -12,6 +12,8 @@ Chaque service a un pattern : start → wait_ready → health_check → evidence
 """
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -20,6 +22,9 @@ from pathlib import Path
 from rich.console import Console
 
 console = Console()
+
+# Default port, overridden by detection
+DEFAULT_WEB_PORT = 3000
 
 
 @dataclass
@@ -33,6 +38,19 @@ class ServiceStatus:
     errors: list[str] = field(default_factory=list)
     pid: int | None = None
     url: str | None = None
+    port: int | None = None
+
+
+def get_web_base_url(workdir: Path) -> str:
+    """Lit le base URL web depuis .oryn/infra.json (écrit par InfraManager)."""
+    infra_path = workdir / ".oryn" / "infra.json"
+    if infra_path.exists():
+        try:
+            data = json.loads(infra_path.read_text())
+            return data.get("web_url", f"http://localhost:{DEFAULT_WEB_PORT}")
+        except (json.JSONDecodeError, OSError):
+            pass
+    return f"http://localhost:{DEFAULT_WEB_PORT}"
 
 
 class InfraManager:
@@ -42,6 +60,11 @@ class InfraManager:
         self.workdir = workdir
         self._procs: list[subprocess.Popen] = []
         self._services: dict[str, ServiceStatus] = {}
+        self._web_port: int = DEFAULT_WEB_PORT
+
+    @property
+    def web_base_url(self) -> str:
+        return f"http://localhost:{self._web_port}"
 
     def start_all(self) -> dict[str, ServiceStatus]:
         """Lance tous les services détectés et retourne leur état."""
@@ -71,7 +94,24 @@ class InfraManager:
             for err in svc.errors[:3]:
                 console.print(f"      [red]{err[:150]}[/red]")
 
+        # Sauvegarder les infos d'infra pour que tout le monde puisse les lire
+        self._save_infra_json()
+
         return self._services
+
+    def _save_infra_json(self) -> None:
+        """Écrit .oryn/infra.json avec les ports/URLs détectés."""
+        infra_path = self.workdir / ".oryn" / "infra.json"
+        data = {
+            "web_url": self.web_base_url,
+            "web_port": self._web_port,
+            "web_healthy": self._services.get("web", ServiceStatus(name="web")).healthy,
+            "convex_running": self._services.get("convex", ServiceStatus(name="convex")).running,
+            "android_running": self._services.get("android", ServiceStatus(name="android")).running,
+            "expo_running": self._services.get("expo", ServiceStatus(name="expo")).running,
+        }
+        infra_path.write_text(json.dumps(data, indent=2))
+        console.print(f"  [dim]infra.json → web={self.web_base_url}[/dim]")
 
     def stop_all(self) -> None:
         """Kill tous les processus lancés."""
@@ -150,8 +190,8 @@ class InfraManager:
     # -------------------------------------------------------------------------
 
     def _start_web(self) -> ServiceStatus:
-        """Lance le serveur web et vérifie qu'il répond."""
-        status = ServiceStatus(name="web", url="http://localhost:3000")
+        """Lance le serveur web, détecte le port, et vérifie qu'il répond."""
+        status = ServiceStatus(name="web")
         console.print("[blue]Starting web server...[/blue]")
 
         web_dir = self.workdir / "apps" / "web"
@@ -175,7 +215,7 @@ class InfraManager:
             status.errors.append("pnpm not found")
             return status
 
-        # Attendre le serveur (max 30s)
+        # Attendre le serveur (max 30s) + détecter le port
         status = self._wait_for_output(
             proc, status,
             ready_keywords=["ready", "listening", "localhost:", "started", "http://", "port"],
@@ -183,9 +223,21 @@ class InfraManager:
             timeout=30,
         )
 
-        # Health check HTTP avec retries
+        # Détecter le port depuis les logs
+        detected_port = self._detect_port_from_logs(status.logs)
+        if detected_port:
+            self._web_port = detected_port
+            console.print(f"  [green]Port détecté : {detected_port}[/green]")
+        else:
+            self._web_port = DEFAULT_WEB_PORT
+            console.print(f"  [dim]Port par défaut : {DEFAULT_WEB_PORT}[/dim]")
+
+        status.port = self._web_port
+        status.url = self.web_base_url
+
+        # Health check HTTP avec retries sur le bon port
         if status.running:
-            status.healthy = self._http_health_check("http://localhost:3000", retries=5, delay=2)
+            status.healthy = self._http_health_check(self.web_base_url, retries=5, delay=2)
             if status.healthy:
                 console.print("[green]  Web server healthy (HTTP 200)[/green]")
             else:
@@ -449,6 +501,36 @@ class InfraManager:
                 pass
             time.sleep(delay)
         return False
+
+    def _detect_port_from_logs(self, logs: str) -> int | None:
+        """Détecte le port du serveur web depuis les logs de démarrage.
+
+        Cherche des patterns comme :
+        - "localhost:3001"
+        - "http://127.0.0.1:5173"
+        - "port 4000"
+        - "listening on :8080"
+        - "ready at http://localhost:3000"
+        """
+        if not logs:
+            return None
+
+        # Pattern 1 : URL complète avec port
+        url_match = re.search(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)', logs)
+        if url_match:
+            return int(url_match.group(1))
+
+        # Pattern 2 : "port XXXX" ou "Port: XXXX"
+        port_match = re.search(r'port[:\s]+(\d{4,5})', logs, re.IGNORECASE)
+        if port_match:
+            return int(port_match.group(1))
+
+        # Pattern 3 : ":XXXX" (listening on :3000)
+        colon_match = re.search(r'(?:listening|started|ready)\s+(?:on\s+)?:(\d{4,5})', logs, re.IGNORECASE)
+        if colon_match:
+            return int(colon_match.group(1))
+
+        return None
 
     def _cmd_exists(self, cmd: str) -> bool:
         """Vérifie si une commande existe."""
