@@ -20,6 +20,7 @@ from .evaluator import Evaluator
 from .generator import Generator
 from .planner import Planner
 from .playwright_runner import install_helpers
+from .scaffold import scaffold_monorepo, add_web_app, add_mobile_app, install_deps
 from .state import ProgressState, Sprint, SprintStatus, StateManager
 from .test_pipeline import install_test_helpers
 
@@ -60,13 +61,28 @@ class HarnessLoop:
                     f"(${research_cost:.2f})[/green]"
                 )
 
+        # Étape 0.5 : Scaffold déterministe (pas d'IA ici)
+        console.rule("[bold blue]SCAFFOLD")
+        scaffold_monorepo(self.config.workdir)
+        # Ajouter les apps par défaut (web + mobile) si pas d'apps custom
+        if not self.config.apps:
+            add_web_app(self.config.workdir)
+            add_mobile_app(self.config.workdir)
+        else:
+            for app_def in self.config.apps:
+                if app_def.platform in ("web", "both"):
+                    add_web_app(self.config.workdir, app_def.name)
+                if app_def.platform in ("mobile", "both"):
+                    add_mobile_app(self.config.workdir, app_def.name)
+        install_deps(self.config.workdir)
+
         # Étape 1 : Planner
         sprints, planner_result = self.planner.plan(design_context=design_context)
         if not sprints:
             console.print("[red]Pas de sprints produits, abandon.[/red]")
             raise RuntimeError("Planner failed to produce sprints")
 
-        # Étape 1.5 : Component Library setup
+        # Étape 1.5 : Component Library setup (IA enrichit ce que le scaffold a créé)
         lib_result = self.component_library.setup()
         lib_cost = lib_result.cost_usd
 

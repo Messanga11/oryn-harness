@@ -1,10 +1,17 @@
-"""Agent GENERATOR : construit le code d'un sprint."""
+"""Agent GENERATOR : construit le code d'un sprint.
+
+Améliorations clés :
+1. Recherche la doc en ligne AVANT de coder
+2. Lit les leçons apprises (erreurs passées) pour ne pas les refaire
+3. Injecte les références design si dispo
+"""
 from __future__ import annotations
 
 from rich.console import Console
 
 from .claude_runner import ClaudeResult, ClaudeRunner
 from .config import HarnessConfig
+from .lessons import get_lessons_for_prompt
 from .prompts import GENERATOR_PROMPT
 from .state import Sprint, StateManager
 
@@ -35,91 +42,101 @@ class Generator:
         """Construit ou itère sur un sprint."""
         console.rule(f"[bold yellow]GENERATOR — sprint {sprint.id} iter {iteration}")
 
-        # Check si des références design existent
+        # Leçons apprises (erreurs passées)
+        lessons = get_lessons_for_prompt(
+            categories=["expo", "tanstack-start", "convex", "nativewind", "turborepo", "react-native", "architecture"],
+            limit=20,
+        )
+        lessons_section = ""
+        if lessons:
+            lessons_section = f"\n{lessons}\n"
+
+        # Références design
         refs_dir = self.config.workdir / ".oryn" / "references"
         has_references = (refs_dir / "design_brief.md").exists()
-
-        references_instruction = ""
+        references_section = ""
         if has_references:
-            references_instruction = """
-IMPORTANT — Références design :
-- Lis `.oryn/references/design_brief.md` pour les patterns design à suivre.
-- Les screenshots de référence sont dans `.oryn/references/` — LIS-LES.
-- `.oryn/references/references.json` contient les notes détaillées par app.
-- Utilise ces références pour guider tes choix de design (couleurs, typo, spacing, layout).
-- Le design web et mobile doivent être pensés SÉPARÉMENT.
+            references_section = """
+# Références design
+- Lis `.oryn/references/design_brief.md` pour les patterns design.
+- LIS les screenshots dans `.oryn/references/` pour t'inspirer visuellement.
 """
 
-        # Info sur les apps du projet
+        # Apps info
         apps = self.state.read_apps()
-        apps_info = ""
+        apps_section = ""
         if apps:
             apps_lines = [f"  - {a.name} ({a.platform}): {a.description}" for a in apps]
-            apps_info = f"""
-Ce projet est un MONOREPO multi-app :
-{chr(10).join(apps_lines)}
+            apps_section = f"\nCe projet est un MONOREPO multi-app :\n" + "\n".join(apps_lines) + f"\nCe sprint cible : {', '.join(sprint.target_apps)}\n"
 
-Ce sprint cible : {', '.join(sprint.target_apps)}
-"""
-
-        # Stack info rapide
         stack = self.config.stack
-        stack_info = f"""
-Stack : {stack.monorepo_tool} + {stack.package_manager} | Web: {stack.web_framework} | Mobile: {stack.mobile_framework} + {stack.mobile_router}
-UI: {stack.ui_library} + {stack.styling} | CMS: {stack.cms} | Grid: {stack.web_grid_columns} cols web / {stack.mobile_grid_columns} cols mobile
-FormBuilder: {stack.form_builder_repo} | TablePage: {stack.table_page_repo}
-"""
 
         if iteration == 0:
-            prompt = f"""Tu commences l'implémentation du sprint **{sprint.id} — {sprint.title}**.
-{stack_info}
-{apps_info}
+            prompt = f"""Tu commences le sprint **{sprint.id} — {sprint.title}**.
+{apps_section}
 
-Avant tout, LIS dans cet ordre :
+# ÉTAPE 1 : RECHERCHE (OBLIGATOIRE avant de coder)
+AVANT d'écrire une seule ligne de code, utilise WebSearch pour :
+1. Chercher la doc officielle des technologies que tu vas utiliser dans ce sprint
+   - Si auth : cherche "better-auth convex integration" ou "convex authentication"
+   - Si TanStack Start : cherche "tanstack start file routes tutorial"
+   - Si Expo : cherche "expo router v4 tabs layout"
+   - Si NativeWind : cherche "nativewind v4 setup tailwind react native"
+   - Si Gluestack : cherche "gluestack ui v2 [composant] example"
+2. Chercher des exemples concrets similaires à ce que tu dois construire
+3. Lire les guides/tutorials trouvés pour comprendre les patterns corrects
+
+NE CODE PAS À L'AVEUGLE. Lis la doc d'abord.
+
+# ÉTAPE 2 : Lire le contexte du projet
 1. `.oryn/spec.md` (la vision)
-2. `.oryn/apps.json` (les apps du monorepo)
-3. `.oryn/feature_list.json` (où ce sprint s'inscrit)
-4. `.oryn/contracts/sprint_{sprint.id}.md` (ce que tu DOIS livrer — c'est la loi)
-{references_instruction}
+2. `.oryn/apps.json` (les apps)
+3. `.oryn/contracts/sprint_{sprint.id}.md` (le contrat — c'est la loi)
+{references_section}
 
-Puis CODE. Implémente chaque critère du contrat :
-- Les composants UI dans packages/ui/
-- Les features dans packages/features/<domain>/
-- Les routes web dans apps/web/src/routes/
-- Les routes mobile dans apps/mobile/app/
-- Les tests co-localisés (.test.ts/.test.tsx)
+# ÉTAPE 3 : Coder
+Stack : {stack.web_framework} | {stack.mobile_framework} + {stack.mobile_router} | {stack.ui_library} + {stack.styling}
+Grid : {stack.web_grid_columns} cols web / {stack.mobile_grid_columns} cols mobile
 
 RAPPELS CRITIQUES :
-- Le MÊME composant de feature doit fonctionner sur web ET mobile
-- Le grid utilise {stack.web_grid_columns} colonnes sur web, {stack.mobile_grid_columns} sur mobile
-- Les imports depuis @repo/ui et @repo/features, pas de chemins relatifs inter-packages
-- CHAQUE hook, service, et composant a son fichier .test.ts
+- ZÉRO <div>/<View>/<p>/<h1> → utilise Box, Typography, etc. depuis @repo/ui
+- Le MÊME composant de feature marche sur web ET mobile
+- Icônes : lucide-react-native (import {{ Icon }} from 'lucide-react-native')
+- Chaque hook/service/composant a son .test.ts co-localisé
+- Ce sprint est une TRANCHE VERTICALE : backend + frontend + routes + tests
 
-Commit en git : `[sprint-{sprint.id}] <résumé>`.
-Termine par le bloc structuré (voir ton system prompt).
+# ÉTAPE 4 : Vérifier
+- `pnpm turbo test` doit passer
+- L'app web doit démarrer (`cd apps/web && pnpm dev`)
+- L'app mobile doit builder (`cd apps/mobile && npx expo start`)
+
+Git commit : `[sprint-{sprint.id}] <résumé>`
+{lessons_section}
+Termine par le bloc structuré (SPRINT_ID, STATUS, WHAT_I_DID, TEST_INSTRUCTIONS).
 """
         else:
             prompt = f"""Tu itères sur le sprint **{sprint.id} — {sprint.title}** (itération {iteration}).
-{stack_info}
-{apps_info}
+{apps_section}
 
-EVALUATOR a posté une critique. Lis-la :
-`.oryn/critiques/sprint_{sprint.id}_iter_{iteration - 1:03d}.md`
+# CRITIQUE DE L'EVALUATOR
+Lis la critique : `.oryn/critiques/sprint_{sprint.id}_iter_{iteration - 1:03d}.md`
+
+L'Evaluator a LANCÉ les apps (browser + émulateur Android) et capturé les logs/erreurs.
+Ses observations sont basées sur des FAITS, pas sur une review de code.
+
+# CE QUE TU DOIS FAIRE
+1. Si l'Evaluator mentionne une erreur de DÉPENDANCE ou de CONFIG :
+   → Utilise WebSearch pour trouver la bonne config/version
+2. Si l'Evaluator mentionne un CRASH au lancement :
+   → Lis les logs d'erreur exacts et fixe la cause racine
+3. Pour chaque critère FAIL du contrat → fixe-le
+4. Re-teste localement : `pnpm turbo test`, lance l'app web + mobile
 
 Lis aussi `.oryn/contracts/sprint_{sprint.id}.md` pour rappel du contrat.
-
-Pour CHAQUE issue bloquante, fixe-la. Pour chaque critère FAIL, fixe-le.
-Re-teste localement (vitest, curl, etc.).
-
-ATTENTION :
-- Vérifie que l'architecture feature-based est respectée
-- Vérifie que les composants sont dans packages/ui/ pas dans les features
-- Vérifie que le grid fonctionne ({stack.web_grid_columns} cols web, {stack.mobile_grid_columns} cols mobile)
-- Vérifie que les tests passent
-
+{lessons_section}
 Si tu patches la même chose 3 fois → `STATUS: RESTART_REQUESTED`.
 
-Commit et termine par le bloc structuré.
+Git commit et termine par le bloc structuré.
 """
 
         result = self.runner.run(prompt)

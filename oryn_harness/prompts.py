@@ -255,6 +255,42 @@ packages/features/<domain>/
 - Client state complexe → Zustand (selector subscriptions)
 - URL state → Router search params
 - Form state → TanStack Form + Zod
+
+## Design & assets — standards pro
+### Icônes
+- **Lucide React** (lucide-react-native) — SEULE lib d'icônes autorisée
+- Import : `import { Home, Settings, Plus } from 'lucide-react-native'`
+- Taille cohérente : 20px nav, 24px actions, 16px inline
+- Couleur via className NativeWind, pas de props color hardcodées
+
+### Illustrations
+- **undraw.co** pour les illustrations de pages (empty states, onboarding, errors)
+- SVG embedé ou composant wrapper, PAS des images raster
+- Style cohérent avec la palette du projet
+- Chaque empty state / error state / loading state a une illustration
+
+### Typographie
+- Définir la font dans les design tokens (@repo/ui/tokens/typography.ts)
+- Hiérarchie claire : h1 (32-40px), h2 (24-28px), h3 (20-22px), body (16px), caption (12-14px)
+- Line-height : 1.2 headings, 1.5 body, 1.6 long text
+- PAS de font system par défaut — choisir une vraie font (Inter, Outfit, Geist, etc.)
+
+### Couleurs
+- Définir la palette dans @repo/ui/tokens/colors.ts
+- Background, surface, text-primary, text-secondary, accent, error, success, warning
+- Dark mode support dès le début
+- Contraste WCAG AA minimum (4.5:1 texte, 3:1 large texte)
+
+### Spacing system
+- Base 4px : 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80
+- Tailwind classes : gap-1 (4px), gap-2 (8px), gap-4 (16px), etc.
+- Cohérent entre web et mobile
+
+### Images
+- `expo-image` sur mobile (cache, placeholder, transitions)
+- `<Image>` depuis @repo/ui (wrapper universel)
+- Toujours spécifier width/height pour éviter les layout shifts
+- Placeholder blur ou skeleton pendant le chargement
 """
 
 
@@ -497,21 +533,44 @@ Si le projet n'a qu'une seule app, écris quand même le fichier avec une seule 
 ]
 ```
 
-# Règles
-- **Sprint 0 = TOUJOURS scaffolding** : monorepo, component library, config partagée
-- **Sprint 1 = TOUJOURS backend/API** : schema Convex/Vex, auth, collections
-- **Sprint 2+ = features** : une feature = un sprint, construite dans packages/features/
-- **Avant-dernier sprint = apps wiring** : brancher les features dans les routes TanStack Start + Expo Router
-- **Dernier sprint = testing + polish** : tests e2e, Lighthouse, Maestro, sécurité, responsive
-- **Max 8 sprints** pour la v1
-- **Chaque sprint doit spécifier `target_apps`** : ["shared"] | ["client-app"] | ["admin-web"] | ["all"]
-- **Pas de gradients violets.** Pas d'AI slop. Pas de "modern and clean".
-- Le design web et mobile doivent être pensés SÉPARÉMENT (pas juste responsive)
+# VERTICAL SLICES (tracer-bullet)
+Chaque sprint est une TRANCHE VERTICALE complète : UI → logique → API → tests.
+PAS de sprints horizontaux ("sprint backend", "sprint frontend").
 
-# Anti-patterns
-- Ne décris PAS l'API endpoint par endpoint — c'est le job du Generator
-- Ne spécifie PAS les fichiers individuels — reste haut niveau
-- Ne planifie PAS plus de 8 sprints
+Exemple MAUVAIS (horizontal) :
+- Sprint 1 : "Setup le backend Convex"
+- Sprint 2 : "Créer les composants UI"
+- Sprint 3 : "Brancher le frontend au backend"
+
+Exemple BON (vertical tracer-bullet) :
+- Sprint 1 : "Auth — Login + Signup qui fonctionne de bout en bout"
+  (schema Convex auth + pages login/signup + hooks + service + route web + route mobile + tests)
+- Sprint 2 : "Notes CRUD — créer, lire, modifier, supprimer une note"
+  (table Convex + composants NoteCard/NoteForm + services + pages list/detail + routes + tests)
+- Sprint 3 : "Éditeur Markdown — éditer le contenu d'une note avec preview"
+  (composant Editor web+mobile + auto-save + tests)
+
+Chaque sprint DOIT livrer quelque chose de TESTABLE et VISIBLE dans l'app.
+L'Evaluator va LANCER l'app dans le browser et l'émulateur pour tester.
+
+# Règles
+- **Sprint 0 = scaffolding** : le harness le fait déjà automatiquement via scripts déterministes.
+  Ton sprint 0 doit se concentrer sur les composants UI de base manquants + design tokens.
+- **Sprint 1+ = features verticales** : chaque sprint = 1 feature complète (backend + frontend + tests)
+- **Chaque sprint inclut ses propres tests** (unit + e2e pour cette feature)
+- **Chaque sprint inclut les routes** (web TanStack Start + mobile Expo Router)
+- **L'app doit TOURNER et être testable** après CHAQUE sprint, pas juste à la fin
+- **Max 8 sprints** pour la v1
+- **Chaque sprint doit spécifier `target_apps`** : ["shared"] | ["client-app"] | ["all"]
+
+# Design — sois SPÉCIFIQUE
+- **Icônes** : utiliser Lucide React (lucide-react-native). Spécifie QUELLES icônes.
+- **Illustrations** : utiliser undraw.co ou illustrations.dev. Spécifie le style.
+- **Couleurs** : donne les hex codes exacts, pas "une palette chaleureuse"
+- **Typo** : donne la font family exacte + tailles
+- **Spacing** : donne le système (4px base, 8/16/24/32/48)
+- Pas de gradients violets. Pas d'AI slop. Pas de "modern and clean".
+- Le design web et mobile doivent être pensés SÉPARÉMENT
 
 À la fin, retourne un résumé court (5 lignes max).
 """

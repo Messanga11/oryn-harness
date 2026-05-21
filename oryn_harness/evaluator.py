@@ -7,11 +7,8 @@ factuel — pas besoin de lui faire confiance pour lancer les apps.
 from __future__ import annotations
 
 import json
-import os
 import re
-import signal
 import subprocess
-import time
 from pathlib import Path
 from typing import Literal
 
@@ -19,6 +16,8 @@ from rich.console import Console
 
 from .claude_runner import ClaudeResult, ClaudeRunner
 from .config import HarnessConfig
+from .infra import InfraManager
+from .lessons import extract_lessons_from_critique
 from .prompts import EVALUATOR_PROMPT
 from .state import RubricScore, Sprint, StateManager
 
@@ -27,16 +26,10 @@ console = Console()
 Verdict = Literal["PASS", "NEEDS_FIX", "REQUEST_RESTART"]
 
 
-class AppRunner:
-    """Lance les apps et capture les preuves (screenshots, logs, tests)."""
+class _Removed:
+    """placeholder"""
 
-    def __init__(self, workdir: Path):
-        self.workdir = workdir
-        self.evidence_dir = workdir / ".oryn" / "evidence"
-        self.evidence_dir.mkdir(parents=True, exist_ok=True)
-        self._procs: list[subprocess.Popen] = []
-
-    def collect_evidence(self) -> dict:
+    def _removed(self) -> dict:
         """Lance les apps, capture tout, retourne un résumé."""
         evidence: dict = {
             "web": {},
@@ -387,9 +380,12 @@ class Evaluator:
         console.rule(f"[bold red]EVALUATOR — sprint {sprint.id} iter {iteration}")
 
         # Phase 1 : Le HARNESS lance les apps et capture les preuves
-        console.print("[bold]Phase 1 : Lancement des apps et capture des preuves[/bold]")
-        app_runner = AppRunner(self.config.workdir)
-        evidence = app_runner.collect_evidence()
+        console.print("[bold]Phase 1 : Lancement infra + apps + capture preuves[/bold]")
+        infra = InfraManager(self.config.workdir)
+        services = infra.start_all()
+
+        # Collecter les preuves depuis les services lancés
+        evidence = self._collect_evidence(services, infra)
 
         # Construire le rapport de preuves pour l'Evaluator
         evidence_report = self._build_evidence_report(evidence)
@@ -479,7 +475,121 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
             )
         console.print(f"[bold]Verdict :[/bold] {verdict}")
 
+        # Phase 3 : Cleanup infra + extraire les leçons
+        infra.stop_all()
+        extract_lessons_from_critique(result.text, sprint.id)
+
         return verdict, scores, result
+
+    def _collect_evidence(self, services: dict, infra: InfraManager) -> dict:
+        """Collecte les preuves depuis les services lancés."""
+        evidence: dict = {"web": {}, "mobile": {}, "tests": {}, "security": {}}
+
+        # Web
+        web_svc = services.get("web")
+        if web_svc:
+            evidence["web"] = {
+                "launched": web_svc.running,
+                "healthy": web_svc.healthy,
+                "http_status": "200" if web_svc.healthy else "error",
+                "logs": web_svc.logs,
+                "errors": web_svc.errors,
+                "screenshots": [],
+            }
+            # Screenshots si web healthy
+            if web_svc.healthy:
+                evidence_dir = self.config.workdir / ".oryn" / "evidence"
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                for name, url in [("home", "http://localhost:3000"), ("login", "http://localhost:3000/login")]:
+                    path = evidence_dir / f"web_{name}.png"
+                    self._playwright_screenshot(url, str(path))
+                    if path.exists():
+                        evidence["web"]["screenshots"].append(str(path))
+
+        # Mobile
+        android_svc = services.get("android")
+        expo_svc = services.get("expo")
+        if android_svc or expo_svc:
+            evidence["mobile"] = {
+                "emulator": android_svc.running if android_svc else False,
+                "launched": expo_svc.running if expo_svc else False,
+                "healthy": expo_svc.healthy if expo_svc else False,
+                "logs": expo_svc.logs if expo_svc else "",
+                "errors": (android_svc.errors if android_svc else []) + (expo_svc.errors if expo_svc else []),
+            }
+
+        # Convex
+        convex_svc = services.get("convex")
+        if convex_svc:
+            evidence["convex"] = {
+                "running": convex_svc.running,
+                "healthy": convex_svc.healthy,
+                "errors": convex_svc.errors,
+            }
+
+        # Unit tests
+        evidence["tests"]["unit"] = self._run_unit_tests()
+
+        # Security
+        evidence["security"]["npm_audit"] = self._run_npm_audit()
+
+        return evidence
+
+    def _run_unit_tests(self) -> dict:
+        result: dict = {"output": "", "pass_count": 0, "fail_count": 0, "ran": False}
+        console.print("[blue]  Unit tests...[/blue]")
+        try:
+            import subprocess
+            proc = subprocess.run(
+                ["pnpm", "turbo", "test", "--", "--reporter=verbose"],
+                cwd=str(self.config.workdir),
+                capture_output=True, text=True, timeout=120,
+            )
+            result["output"] = proc.stdout[-3000:] + "\n" + proc.stderr[-1000:]
+            result["ran"] = True
+            for line in proc.stdout.split("\n"):
+                if "✓" in line or "pass" in line.lower():
+                    result["pass_count"] += 1
+                if "✗" in line or "fail" in line.lower():
+                    result["fail_count"] += 1
+            console.print(f"  [dim]  {result['pass_count']} pass, {result['fail_count']} fail[/dim]")
+        except Exception as e:
+            result["output"] = str(e)
+        return result
+
+    def _run_npm_audit(self) -> dict:
+        result: dict = {"output": "", "critical": 0, "high": 0}
+        try:
+            import subprocess
+            proc = subprocess.run(
+                ["pnpm", "audit", "--json"],
+                cwd=str(self.config.workdir),
+                capture_output=True, text=True, timeout=30,
+            )
+            result["output"] = proc.stdout[-2000:]
+            try:
+                audit = json.loads(proc.stdout)
+                vuln = audit.get("metadata", {}).get("vulnerabilities", {})
+                result["critical"] = vuln.get("critical", 0)
+                result["high"] = vuln.get("high", 0)
+            except (json.JSONDecodeError, KeyError):
+                pass
+        except Exception:
+            pass
+        return result
+
+    def _playwright_screenshot(self, url: str, output: str) -> None:
+        script = self.config.workdir / ".oryn" / "scripts" / "pw_check.py"
+        if not script.exists():
+            return
+        try:
+            import subprocess
+            subprocess.run(
+                ["python3", str(script), url, "--screenshot", output],
+                capture_output=True, text=True, timeout=20,
+            )
+        except Exception:
+            pass
 
     def _build_evidence_report(self, evidence: dict) -> str:
         """Construit un rapport texte des preuves pour l'Evaluator."""
