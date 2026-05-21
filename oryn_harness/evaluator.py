@@ -385,7 +385,7 @@ class Evaluator:
         services = infra.start_all()
 
         # Collecter les preuves depuis les services lancés
-        evidence = self._collect_evidence(services, infra)
+        evidence = self._collect_evidence(services, infra, sprint)
 
         # Construire le rapport de preuves pour l'Evaluator
         evidence_report = self._build_evidence_report(evidence)
@@ -495,9 +495,21 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
 
         return verdict, scores, result
 
-    def _collect_evidence(self, services: dict, infra: InfraManager) -> dict:
+    def _collect_evidence(self, services: dict, infra: InfraManager, sprint: Sprint) -> dict:
         """Collecte les preuves depuis les services lancés."""
         evidence: dict = {"web": {}, "mobile": {}, "tests": {}, "security": {}}
+
+        # Lire le rapport du Generator (il a déjà vérifié + pris des screenshots)
+        gen_report_path = self.config.workdir / ".oryn" / "evidence" / f"gen_{sprint.id}_report.json"
+        gen_report: dict = {}
+        if gen_report_path.exists():
+            try:
+                gen_report = json.loads(gen_report_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Screenshots du Generator (déjà pris sur les bonnes URLs)
+        gen_screenshots = gen_report.get("screenshots", [])
 
         # Web
         web_svc = services.get("web")
@@ -508,14 +520,24 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
                 "http_status": "200" if web_svc.healthy else "error",
                 "logs": web_svc.logs,
                 "errors": web_svc.errors,
-                "screenshots": [],
+                "screenshots": [s["path"] for s in gen_screenshots if Path(s["path"]).exists()],
             }
-            # Screenshots si web healthy
+
+            # Prendre des screenshots supplémentaires du Reviewer sur les mêmes URLs
             if web_svc.healthy:
                 evidence_dir = self.config.workdir / ".oryn" / "evidence"
                 evidence_dir.mkdir(parents=True, exist_ok=True)
-                for name, url in [("home", "http://localhost:3000"), ("login", "http://localhost:3000/login")]:
-                    path = evidence_dir / f"web_{name}.png"
+
+                # URLs depuis le rapport du Generator
+                urls_to_check = gen_report.get("urls_tested", [])
+                if not urls_to_check:
+                    # Fallback : URLs par défaut + sprint-aware
+                    urls_to_check = [{"name": "home", "url": "http://localhost:3000"}]
+
+                for url_info in urls_to_check:
+                    name = url_info.get("name", "page")
+                    url = url_info.get("url", "http://localhost:3000")
+                    path = evidence_dir / f"eval_{sprint.id}_{name}.png"
                     self._playwright_screenshot(url, str(path))
                     if path.exists():
                         evidence["web"]["screenshots"].append(str(path))
