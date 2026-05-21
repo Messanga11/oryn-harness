@@ -31,10 +31,104 @@ def scaffold_monorepo(workdir: Path) -> None:
             "test": "turbo test",
             "test:e2e": "turbo test:e2e",
             "lint": "turbo lint",
+            "lint:fix": "biome check --write . && eslint --fix .",
+            "quality": "turbo lint && knip && biome check .",
             "clean": "turbo clean",
         },
         "devDependencies": {
             "turbo": "^2",
+            "@biomejs/biome": "^1",
+            "eslint": "^9",
+            "eslint-plugin-react": "^7",
+            "eslint-plugin-jsx-a11y": "^6",
+            "eslint-plugin-tailwindcss": "^3",
+            "knip": "^5",
+        },
+    }, indent=2))
+
+    # Biome config — fast linter/formatter
+    _write(workdir / "biome.json", json.dumps({
+        "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+        "organizeImports": {"enabled": True},
+        "formatter": {"indentStyle": "space", "indentWidth": 2, "lineWidth": 100},
+        "linter": {
+            "enabled": True,
+            "rules": {
+                "recommended": True,
+                "complexity": {
+                    "noExcessiveCognitiveComplexity": {"level": "warn", "options": {"maxAllowedComplexity": 15}},
+                },
+                "suspicious": {
+                    "noConsole": "warn",
+                    "noDebugger": "error",
+                },
+                "style": {
+                    "useConst": "error",
+                    "noVar": "error",
+                },
+            },
+        },
+    }, indent=2))
+
+    # ESLint config — design system enforcement + a11y
+    _write(workdir / "eslint.config.js", """import react from 'eslint-plugin-react'
+import jsxA11y from 'eslint-plugin-jsx-a11y'
+import tailwind from 'eslint-plugin-tailwindcss'
+
+export default [
+  react.configs.flat.recommended,
+  ...tailwind.configs['flat/recommended'],
+  jsxA11y.flatConfigs.recommended,
+  {
+    rules: {
+      // BAN raw HTML elements — force design system usage
+      'react/forbid-elements': ['error', {
+        forbid: [
+          { element: 'div', message: 'Use <Box> from @repo/ui' },
+          { element: 'span', message: 'Use <Box> or <Typography> from @repo/ui' },
+          { element: 'p', message: 'Use <Typography variant="body"> from @repo/ui' },
+          { element: 'h1', message: 'Use <Typography variant="h1"> from @repo/ui' },
+          { element: 'h2', message: 'Use <Typography variant="h2"> from @repo/ui' },
+          { element: 'h3', message: 'Use <Typography variant="h3"> from @repo/ui' },
+          { element: 'h4', message: 'Use <Typography variant="h4"> from @repo/ui' },
+          { element: 'h5', message: 'Use <Typography variant="h5"> from @repo/ui' },
+          { element: 'h6', message: 'Use <Typography variant="h6"> from @repo/ui' },
+          { element: 'button', message: 'Use <Button> from @repo/ui' },
+          { element: 'input', message: 'Use <Input> from @repo/ui' },
+          { element: 'textarea', message: 'Use <TextArea> from @repo/ui' },
+          { element: 'img', message: 'Use <Image> from @repo/ui' },
+          { element: 'a', message: 'Use <Link> from @repo/ui or router Link' },
+          { element: 'ul', message: 'Use <List> from @repo/ui' },
+          { element: 'li', message: 'Use <ListItem> from @repo/ui' },
+        ],
+      }],
+      // Accessibility
+      'jsx-a11y/alt-text': 'error',
+      'jsx-a11y/aria-props': 'error',
+      'jsx-a11y/click-events-have-key-events': 'warn',
+      // Tailwind
+      'tailwindcss/no-custom-classname': 'warn',
+      'tailwindcss/classnames-order': 'warn',
+    },
+    settings: {
+      react: { version: 'detect' },
+    },
+  },
+  {
+    // Allow raw elements in packages/ui (the design system itself)
+    files: ['packages/ui/**'],
+    rules: { 'react/forbid-elements': 'off' },
+  },
+]
+""")
+
+    # Knip config — dead code detection
+    _write(workdir / "knip.json", json.dumps({
+        "workspaces": {
+            "packages/ui": {"entry": ["src/index.ts"]},
+            "packages/features": {"entry": ["src/index.ts"]},
+            "apps/web": {"entry": ["src/routes/**/*.tsx"]},
+            "apps/mobile": {"entry": ["app/**/*.tsx"]},
         },
     }, indent=2))
 

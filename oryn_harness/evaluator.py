@@ -533,6 +533,13 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
         # Security
         evidence["security"]["npm_audit"] = self._run_npm_audit()
 
+        # Code quality
+        evidence["quality"] = self._run_quality_checks()
+
+        # Accessibility (axe-core via Playwright if web is healthy)
+        if evidence.get("web", {}).get("healthy"):
+            evidence["accessibility"] = self._run_axe_audit()
+
         return evidence
 
     def _run_unit_tests(self) -> dict:
@@ -590,6 +597,119 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
             )
         except Exception:
             pass
+
+    def _run_quality_checks(self) -> dict:
+        """Lance Biome + ESLint + Knip pour la qualité du code."""
+        result: dict = {"biome": "", "eslint": "", "knip": "", "errors": 0, "warnings": 0}
+        console.print("[blue]  Code quality checks...[/blue]")
+
+        # Biome
+        try:
+            proc = subprocess.run(
+                ["npx", "biome", "check", "--reporter=summary", "."],
+                cwd=str(self.config.workdir),
+                capture_output=True, text=True, timeout=60,
+            )
+            result["biome"] = proc.stdout[-2000:]
+            result["errors"] += proc.stdout.lower().count("error")
+            result["warnings"] += proc.stdout.lower().count("warn")
+            console.print(f"  [dim]  Biome: done[/dim]")
+        except Exception:
+            pass
+
+        # ESLint (design system enforcement)
+        try:
+            proc = subprocess.run(
+                ["npx", "eslint", "--format=compact", "packages/", "apps/"],
+                cwd=str(self.config.workdir),
+                capture_output=True, text=True, timeout=60,
+            )
+            result["eslint"] = proc.stdout[-2000:]
+            # Count forbidden elements (design system violations)
+            ds_violations = proc.stdout.count("forbid-elements")
+            result["design_system_violations"] = ds_violations
+            if ds_violations > 0:
+                console.print(f"  [yellow]  ESLint: {ds_violations} design system violations (<div>, <p>, etc.)[/yellow]")
+            else:
+                console.print(f"  [green]  ESLint: 0 design system violations[/green]")
+        except Exception:
+            pass
+
+        # Knip (dead code)
+        try:
+            proc = subprocess.run(
+                ["npx", "knip", "--no-progress"],
+                cwd=str(self.config.workdir),
+                capture_output=True, text=True, timeout=60,
+            )
+            result["knip"] = proc.stdout[-1500:]
+            unused = proc.stdout.count("unused")
+            result["unused_exports"] = unused
+            console.print(f"  [dim]  Knip: {unused} unused items[/dim]")
+        except Exception:
+            pass
+
+        return result
+
+    def _run_axe_audit(self) -> dict:
+        """Lance un audit accessibilité avec axe-core via Playwright."""
+        result: dict = {"violations": 0, "passes": 0, "details": ""}
+        console.print("[blue]  Accessibility audit (axe-core)...[/blue]")
+
+        # Script Python inline pour axe-core
+        axe_script = """
+import json, sys
+from playwright.sync_api import sync_playwright
+
+url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:3000"
+
+with sync_playwright() as pw:
+    browser = pw.chromium.launch(headless=True)
+    page = browser.new_page()
+    try:
+        page.goto(url, wait_until="networkidle", timeout=15000)
+    except Exception:
+        page.goto(url, timeout=15000)
+
+    # Inject axe-core
+    axe_js = page.evaluate('''async () => {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/axe-core@latest/axe.min.js";
+        document.head.appendChild(script);
+        await new Promise(r => script.onload = r);
+        const results = await axe.run();
+        return {
+            violations: results.violations.length,
+            passes: results.passes.length,
+            details: results.violations.map(v => ({
+                id: v.id,
+                impact: v.impact,
+                description: v.description,
+                nodes: v.nodes.length,
+            }))
+        };
+    }''')
+    print(json.dumps(axe_js))
+    browser.close()
+"""
+        try:
+            proc = subprocess.run(
+                ["python3", "-c", axe_script, "http://localhost:3000"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.stdout.strip():
+                data = json.loads(proc.stdout.strip())
+                result["violations"] = data.get("violations", 0)
+                result["passes"] = data.get("passes", 0)
+                result["details"] = json.dumps(data.get("details", [])[:10], indent=2)
+                console.print(
+                    f"  [{'red' if result['violations'] > 0 else 'green'}]"
+                    f"  a11y: {result['violations']} violations, {result['passes']} passes[/]"
+                )
+        except Exception as e:
+            result["details"] = str(e)
+
+        return result
 
     def _build_evidence_report(self, evidence: dict) -> str:
         """Construit un rapport texte des preuves pour l'Evaluator."""
@@ -653,8 +773,39 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
             lines.append(f"- npm audit critical : {audit.get('critical', '?')}")
             lines.append(f"- npm audit high : {audit.get('high', '?')}")
 
+        # Code quality
+        quality = evidence.get("quality", {})
+        if quality:
+            lines.append("\n## Code Quality")
+            ds_v = quality.get("design_system_violations", 0)
+            lines.append(f"- Design system violations (<div>, <p>, etc.) : {ds_v}")
+            lines.append(f"- Biome errors : {quality.get('errors', '?')}")
+            lines.append(f"- Biome warnings : {quality.get('warnings', '?')}")
+            lines.append(f"- Unused exports (Knip) : {quality.get('unused_exports', '?')}")
+            if quality.get("eslint"):
+                lines.append(f"- ESLint output :\n```\n{quality['eslint'][-1000:]}\n```")
+
+        # Accessibility
+        a11y = evidence.get("accessibility", {})
+        if a11y:
+            lines.append("\n## Accessibilité (axe-core)")
+            lines.append(f"- Violations : {a11y.get('violations', '?')}")
+            lines.append(f"- Passes : {a11y.get('passes', '?')}")
+            if a11y.get("details"):
+                lines.append(f"- Détails :\n```\n{a11y['details'][:1500]}\n```")
+
+        # Convex
+        convex = evidence.get("convex", {})
+        if convex:
+            lines.append("\n## Backend (Convex)")
+            lines.append(f"- Running : {'OUI' if convex.get('running') else 'NON'}")
+            lines.append(f"- Healthy : {'OUI' if convex.get('healthy') else 'NON'}")
+            if convex.get("errors"):
+                for e in convex["errors"][:5]:
+                    lines.append(f"  - {e[:200]}")
+
         if not lines:
-            return "Aucune preuve capturée (pas d'apps trouvées dans apps/web ou apps/mobile)."
+            return "Aucune preuve capturée."
 
         return "\n".join(lines)
 
