@@ -19,6 +19,7 @@ from .design_research import DesignResearcher
 from .evaluator import Evaluator
 from .generator import Generator
 from .planner import Planner
+from .guides import install_guides
 from .playwright_runner import install_helpers
 from .scaffold import scaffold_monorepo, add_web_app, add_mobile_app, install_deps
 from .state import ProgressState, Sprint, SprintStatus, StateManager
@@ -36,6 +37,7 @@ class HarnessLoop:
         self.state.init()
         install_helpers(config.workdir)
         install_test_helpers(config.workdir)
+        install_guides(config.workdir)
 
         self.researcher = DesignResearcher(config, self.state) if config.enable_design_research else None
         self.component_library = ComponentLibraryManager(config, self.state)

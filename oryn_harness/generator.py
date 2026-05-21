@@ -75,6 +75,14 @@ class Generator:
             prompt = f"""Tu commences le sprint **{sprint.id} — {sprint.title}**.
 {apps_section}
 
+# ÉTAPE 0 : LIRE LES GUIDES (OBLIGATOIRE)
+AVANT TOUT, lis ces fichiers de référence :
+1. `.oryn/guides/coding-patterns.md` — patterns senior dev (compound components, caching, error handling, performance)
+2. `.oryn/guides/ui-ux-quality.md` — standards UI/UX (4 états obligatoires, micro-interactions, typo, couleurs)
+3. `.oryn/guides/design-system-compliance.md` — règles du design system (zéro div/p/h1, pas de styles inline)
+
+Ces guides sont la LOI. Chaque pattern, chaque règle DOIT être suivie.
+
 # ÉTAPE 1 : RECHERCHE (OBLIGATOIRE avant de coder)
 AVANT d'écrire une seule ligne de code, utilise WebSearch pour :
 1. Chercher la doc officielle des technologies que tu vas utiliser dans ce sprint

@@ -444,13 +444,27 @@ Ce sont des FAITS. Utilise-les pour ton évaluation.
 - [ ] Blocks CMS dans BLOCK_REGISTRY
 
 # Ta mission
-1. LIS les screenshots capturés (si disponibles)
-2. Analyse les logs et erreurs ci-dessus
-3. Vérifie CHAQUE critère du contrat
-4. Vérifie l'architecture
-5. Écris ta critique dans `.oryn/critiques/sprint_{sprint.id}_iter_{iteration:03d}.md`
-6. Si l'app crash au lancement (voir logs) → NEEDS_FIX immédiat
-7. Si les tests unitaires échouent → cite les erreurs exactes
+1. LIS `.oryn/guides/coding-patterns.md` et `.oryn/guides/ui-ux-quality.md`
+2. LIS les screenshots capturés (si disponibles)
+3. Analyse les logs et erreurs ci-dessus
+4. Vérifie CHAQUE critère du contrat
+5. Vérifie l'architecture + design system compliance
+6. **Vérifie la qualité du code** :
+   - Compound components là où c'est pertinent ?
+   - Error boundaries en place ?
+   - Query key factories colocalisées ?
+   - Optimistic updates pour les mutations ?
+   - Pas de copie de query data dans du state local ?
+7. **Vérifie l'UI/UX** :
+   - Les 4 états (loading skeleton, data, empty+illustration, error+retry) ?
+   - Micro-interactions (press feedback, loading sur boutons) ?
+   - Touch targets >= 44px ?
+   - Typographie cohérente (hiérarchie h1>h2>body>caption) ?
+   - Icônes Lucide cohérentes (taille, stroke) ?
+   - Illustrations undraw pour les empty states ?
+8. **Design system violations** : regarde le score ESLint forbid-elements ci-dessus
+9. Écris ta critique dans `.oryn/critiques/sprint_{sprint.id}_iter_{iteration:03d}.md`
+10. Si l'app crash au lancement → NEEDS_FIX immédiat
 
 # Output OBLIGATOIRE
 ```
