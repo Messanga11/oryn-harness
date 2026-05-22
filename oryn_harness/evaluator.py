@@ -381,13 +381,7 @@ class Evaluator:
 
         # Phase 1 : Le HARNESS lance les apps et capture les preuves
         console.print("[bold]Phase 1 : Lancement infra + apps + capture preuves[/bold]")
-        infra = InfraManager(self.config.workdir)
-        services = infra.start_all()
-
-        # Collecter les preuves depuis les services lancés
-        evidence = self._collect_evidence(services, infra, sprint)
-
-        # Construire le rapport de preuves pour l'Evaluator
+        infra, evidence = self._launch_and_capture_with_retry(sprint)
         evidence_report = self._build_evidence_report(evidence)
 
         # Check si le projet compile (le Generator a déjà vérifié)
@@ -515,6 +509,77 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
         extract_lessons_from_critique(result.text, sprint.id)
 
         return verdict, scores, result
+
+    def _launch_and_capture_with_retry(self, sprint: Sprint) -> tuple:
+        """Lance l'infra, capture les preuves. Si les screenshots sont suspects, retry sur un autre port."""
+        max_attempts = 3
+
+        for attempt in range(max_attempts):
+            infra = InfraManager(self.config.workdir)
+            services = infra.start_all()
+            evidence = self._collect_evidence(services, infra, sprint)
+
+            # Vérifier que les screenshots sont valides (pas des pages blanches/erreur)
+            screenshots = evidence.get("web", {}).get("screenshots", [])
+            if not screenshots:
+                console.print("[yellow]  Pas de screenshots web capturés[/yellow]")
+                return infra, evidence
+
+            if self._screenshots_look_valid(screenshots):
+                console.print(f"[green]  Screenshots valides (attempt {attempt + 1})[/green]")
+                return infra, evidence
+
+            # Screenshots suspects — essayer de trouver le bon port
+            console.print(f"[yellow]  Screenshots suspects (trop petits/vides), attempt {attempt + 1}/{max_attempts}[/yellow]")
+            infra.stop_all()
+
+            # Scanner les ports actifs pour trouver le serveur web
+            real_port = self._scan_for_web_server()
+            if real_port and real_port != infra._web_port:
+                console.print(f"[blue]  Serveur web détecté sur port {real_port}, retry...[/blue]")
+                # Écrire le bon port dans infra.json
+                import json as _json
+                infra_path = self.config.workdir / ".oryn" / "infra.json"
+                infra_data = {"web_url": f"http://localhost:{real_port}", "web_port": real_port}
+                infra_path.write_text(_json.dumps(infra_data, indent=2))
+            else:
+                console.print("[yellow]  Pas d'autre port trouvé[/yellow]")
+                break
+
+        return infra, evidence
+
+    def _screenshots_look_valid(self, screenshot_paths: list[str]) -> bool:
+        """Vérifie que les screenshots ne sont pas des pages blanches/erreur.
+
+        Heuristique : un vrai screenshot fait > 15KB.
+        Une page blanche ou "Cannot GET /" fait < 5KB.
+        """
+        for path_str in screenshot_paths:
+            path = Path(path_str)
+            if path.exists():
+                size = path.stat().st_size
+                if size > 15_000:  # > 15KB = probablement un vrai contenu
+                    return True
+                console.print(f"  [dim]  {path.name}: {size} bytes (suspect)[/dim]")
+        return False
+
+    def _scan_for_web_server(self) -> int | None:
+        """Scanne les ports courants pour trouver un serveur web actif."""
+        common_ports = [3000, 3001, 3002, 5173, 5174, 4321, 8080, 8000, 4000]
+
+        for port in common_ports:
+            try:
+                result = subprocess.run(
+                    ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", f"http://localhost:{port}"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                code = result.stdout.strip()
+                if code.startswith("2") or code.startswith("3"):
+                    console.print(f"  [green]  Port {port}: HTTP {code}[/green]")
+                    return port
+            except Exception:
+                pass
+        return None
 
     def _collect_evidence(self, services: dict, infra: InfraManager, sprint: Sprint) -> dict:
         """Collecte les preuves depuis les services lancés."""
