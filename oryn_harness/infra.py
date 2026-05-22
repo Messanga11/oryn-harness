@@ -13,7 +13,6 @@ Chaque service a un pattern : start → wait_ready → health_check → evidence
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -42,15 +41,27 @@ class ServiceStatus:
 
 
 def get_web_base_url(workdir: Path) -> str:
-    """Lit le base URL web depuis .oryn/infra.json (écrit par InfraManager)."""
+    """Lit le base URL web depuis .oryn/infra.json (écrit par le scaffold)."""
     infra_path = workdir / ".oryn" / "infra.json"
     if infra_path.exists():
         try:
             data = json.loads(infra_path.read_text())
-            return data.get("web_url", f"http://localhost:{DEFAULT_WEB_PORT}")
-        except (json.JSONDecodeError, OSError):
+            return data["web_url"]
+        except (json.JSONDecodeError, OSError, KeyError):
             pass
     return f"http://localhost:{DEFAULT_WEB_PORT}"
+
+
+def get_web_port(workdir: Path) -> int:
+    """Lit le port web depuis .oryn/infra.json (écrit par le scaffold)."""
+    infra_path = workdir / ".oryn" / "infra.json"
+    if infra_path.exists():
+        try:
+            data = json.loads(infra_path.read_text())
+            return int(data["web_port"])
+        except (json.JSONDecodeError, OSError, KeyError, ValueError):
+            pass
+    return DEFAULT_WEB_PORT
 
 
 class InfraManager:
@@ -60,7 +71,7 @@ class InfraManager:
         self.workdir = workdir
         self._procs: list[subprocess.Popen] = []
         self._services: dict[str, ServiceStatus] = {}
-        self._web_port: int = DEFAULT_WEB_PORT
+        self._web_port: int = get_web_port(workdir)
 
     @property
     def web_base_url(self) -> str:
@@ -190,9 +201,9 @@ class InfraManager:
     # -------------------------------------------------------------------------
 
     def _start_web(self) -> ServiceStatus:
-        """Lance le serveur web, détecte le port, et vérifie qu'il répond."""
-        status = ServiceStatus(name="web")
-        console.print("[blue]Starting web server...[/blue]")
+        """Lance le serveur web sur le port fixe et vérifie qu'il répond."""
+        status = ServiceStatus(name="web", port=self._web_port, url=self.web_base_url)
+        console.print(f"[blue]Starting web server on port {self._web_port}...[/blue]")
 
         web_dir = self.workdir / "apps" / "web"
 
@@ -223,19 +234,7 @@ class InfraManager:
             timeout=30,
         )
 
-        # Détecter le port depuis les logs
-        detected_port = self._detect_port_from_logs(status.logs)
-        if detected_port:
-            self._web_port = detected_port
-            console.print(f"  [green]Port détecté : {detected_port}[/green]")
-        else:
-            self._web_port = DEFAULT_WEB_PORT
-            console.print(f"  [dim]Port par défaut : {DEFAULT_WEB_PORT}[/dim]")
-
-        status.port = self._web_port
-        status.url = self.web_base_url
-
-        # Health check HTTP avec retries sur le bon port
+        # Health check HTTP sur le port configuré
         if status.running:
             status.healthy = self._http_health_check(self.web_base_url, retries=5, delay=2)
             if status.healthy:
@@ -501,36 +500,6 @@ class InfraManager:
                 pass
             time.sleep(delay)
         return False
-
-    def _detect_port_from_logs(self, logs: str) -> int | None:
-        """Détecte le port du serveur web depuis les logs de démarrage.
-
-        Cherche des patterns comme :
-        - "localhost:3001"
-        - "http://127.0.0.1:5173"
-        - "port 4000"
-        - "listening on :8080"
-        - "ready at http://localhost:3000"
-        """
-        if not logs:
-            return None
-
-        # Pattern 1 : URL complète avec port
-        url_match = re.search(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)', logs)
-        if url_match:
-            return int(url_match.group(1))
-
-        # Pattern 2 : "port XXXX" ou "Port: XXXX"
-        port_match = re.search(r'port[:\s]+(\d{4,5})', logs, re.IGNORECASE)
-        if port_match:
-            return int(port_match.group(1))
-
-        # Pattern 3 : ":XXXX" (listening on :3000)
-        colon_match = re.search(r'(?:listening|started|ready)\s+(?:on\s+)?:(\d{4,5})', logs, re.IGNORECASE)
-        if colon_match:
-            return int(colon_match.group(1))
-
-        return None
 
     def _cmd_exists(self, cmd: str) -> bool:
         """Vérifie si une commande existe."""

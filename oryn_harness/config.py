@@ -11,7 +11,8 @@ class StackConfig:
 
     # Web
     web_framework: str = "tanstack-start"
-    web_meta_framework: str = "vinxi"  # TanStack Start est basé sur Vinxi
+    web_meta_framework: str = "vinxi"
+    web_port: int = 3000  # Port fixe, configuré dans le scaffold
 
     # Mobile
     mobile_framework: str = "expo"

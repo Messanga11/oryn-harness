@@ -65,15 +65,15 @@ class HarnessLoop:
 
         # Étape 0.5 : Scaffold déterministe (pas d'IA ici)
         console.rule("[bold blue]SCAFFOLD")
-        scaffold_monorepo(self.config.workdir)
-        # Ajouter les apps par défaut (web + mobile) si pas d'apps custom
+        web_port = self.config.stack.web_port
+        scaffold_monorepo(self.config.workdir, web_port=web_port)
         if not self.config.apps:
-            add_web_app(self.config.workdir)
+            add_web_app(self.config.workdir, port=web_port)
             add_mobile_app(self.config.workdir)
         else:
             for app_def in self.config.apps:
                 if app_def.platform in ("web", "both"):
-                    add_web_app(self.config.workdir, app_def.name)
+                    add_web_app(self.config.workdir, app_def.name, port=web_port)
                 if app_def.platform in ("mobile", "both"):
                     add_mobile_app(self.config.workdir, app_def.name)
         install_deps(self.config.workdir)

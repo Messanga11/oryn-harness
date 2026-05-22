@@ -15,9 +15,17 @@ from rich.console import Console
 console = Console()
 
 
-def scaffold_monorepo(workdir: Path) -> None:
+def scaffold_monorepo(workdir: Path, web_port: int = 3000) -> None:
     """Crée la structure complète du monorepo."""
     console.print("[bold blue]Scaffolding monorepo...[/bold blue]")
+
+    # Écrire le port fixe dans .oryn/infra.json dès le scaffold
+    oryn_dir = workdir / ".oryn"
+    oryn_dir.mkdir(parents=True, exist_ok=True)
+    _write(oryn_dir / "infra.json", json.dumps({
+        "web_url": f"http://localhost:{web_port}",
+        "web_port": web_port,
+    }, indent=2))
 
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -163,9 +171,9 @@ export default [
     console.print("[green]✓ Monorepo scaffolded[/green]")
 
 
-def add_web_app(workdir: Path, name: str = "web") -> None:
-    """Ajoute une app TanStack Start au monorepo."""
-    console.print(f"[blue]Adding web app: {name}[/blue]")
+def add_web_app(workdir: Path, name: str = "web", port: int = 3000) -> None:
+    """Ajoute une app TanStack Start au monorepo avec un port fixe."""
+    console.print(f"[blue]Adding web app: {name} (port {port})[/blue]")
 
     app_dir = workdir / "apps" / name
     app_dir.mkdir(parents=True, exist_ok=True)
@@ -175,9 +183,9 @@ def add_web_app(workdir: Path, name: str = "web") -> None:
         "private": True,
         "type": "module",
         "scripts": {
-            "dev": "vinxi dev",
+            "dev": f"vinxi dev --port {port}",
             "build": "vinxi build",
-            "start": "vinxi start",
+            "start": f"vinxi start --port {port}",
             "test": "vitest run",
             "test:e2e": "playwright test",
         },
@@ -248,13 +256,13 @@ export const Route = createFileRoute('/')({
 """)
 
     # Playwright config
-    _write(app_dir / "playwright.config.ts", """import { defineConfig } from '@playwright/test'
+    _write(app_dir / "playwright.config.ts", f"""import {{ defineConfig }} from '@playwright/test'
 
-export default defineConfig({
+export default defineConfig({{
   testDir: './tests',
-  webServer: { command: 'pnpm dev', port: 3000, reuseExistingServer: true },
-  use: { baseURL: 'http://localhost:3000' },
-})
+  webServer: {{ command: 'pnpm dev', port: {port}, reuseExistingServer: true }},
+  use: {{ baseURL: 'http://localhost:{port}' }},
+}})
 """)
 
     (app_dir / "tests").mkdir(exist_ok=True)
