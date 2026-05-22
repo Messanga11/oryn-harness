@@ -432,11 +432,179 @@ Chaque composant complexe doit suivre le pattern compound :
 """
 
 
+PLAYWRIGHT_GUIDE = """# Guide Playwright — Tester les apps web
+
+## Scripts disponibles
+
+### pw_check.py — screenshot + interaction + console
+Chemin : `.oryn/scripts/pw_check.py`
+
+```bash
+# Screenshot simple d'une page
+python .oryn/scripts/pw_check.py http://localhost:3000 --screenshot /tmp/home.png
+
+# Screenshot + logs console JS (voir les erreurs)
+python .oryn/scripts/pw_check.py http://localhost:3000 --screenshot /tmp/home.png --dump-console
+
+# Cliquer un bouton puis screenshot
+python .oryn/scripts/pw_check.py http://localhost:3000 --click "button.submit" --screenshot /tmp/after-click.png
+
+# Remplir un formulaire puis screenshot
+python .oryn/scripts/pw_check.py http://localhost:3000/login \\
+  --fill "input[name=email]" "test@example.com" \\
+  --screenshot /tmp/login-filled.png
+
+# Récupérer le HTML rendu (debug)
+python .oryn/scripts/pw_check.py http://localhost:3000 --dump-html
+
+# Attendre plus longtemps (pour les pages lentes)
+python .oryn/scripts/pw_check.py http://localhost:3000 --wait 5000 --screenshot /tmp/slow.png
+```
+
+### pw_screenshot.py — screenshot de sites externes (design research)
+Chemin : `.oryn/scripts/pw_screenshot.py`
+
+```bash
+python .oryn/scripts/pw_screenshot.py https://linear.app --output .oryn/references/linear.png
+```
+
+## Utiliser Playwright directement en Python
+
+Si pw_check.py ne suffit pas, tu peux écrire du Playwright directement :
+
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as pw:
+    browser = pw.chromium.launch(headless=True)
+    page = browser.new_page()
+
+    # Naviguer
+    page.goto("http://localhost:3000/login")
+
+    # Remplir un formulaire
+    page.fill("input[name=email]", "test@example.com")
+    page.fill("input[name=password]", "password123")
+
+    # Cliquer
+    page.click("button[type=submit]")
+
+    # Attendre la navigation
+    page.wait_for_url("**/dashboard")
+
+    # Vérifier qu'un élément est visible
+    assert page.is_visible("text=Welcome")
+
+    # Screenshot
+    page.screenshot(path="/tmp/dashboard.png")
+
+    # Lire le texte d'un élément
+    title = page.text_content("h1")
+    print(f"Title: {title}")
+
+    # Lire les logs console
+    page.on("console", lambda msg: print(f"[{msg.type}] {msg.text}"))
+
+    # Vérifier le réseau (requêtes API)
+    with page.expect_response("**/api/**") as response_info:
+        page.click("button.save")
+    response = response_info.value
+    print(f"API: {response.status} {response.url}")
+
+    browser.close()
+```
+
+## Scénarios de test courants
+
+### Tester un login complet
+```bash
+# 1. Screenshot la page login
+python .oryn/scripts/pw_check.py http://localhost:3000/login --screenshot /tmp/01-login.png --dump-console
+
+# 2. Remplir le formulaire
+python .oryn/scripts/pw_check.py http://localhost:3000/login \\
+  --fill "input[name=email]" "test@example.com" \\
+  --screenshot /tmp/02-login-filled.png
+
+# 3. Soumettre et voir le résultat
+python .oryn/scripts/pw_check.py http://localhost:3000/login \\
+  --fill "input[name=email]" "test@example.com" \\
+  --click "button[type=submit]" \\
+  --wait 3000 \\
+  --screenshot /tmp/03-after-login.png \\
+  --dump-console
+```
+
+### Tester la navigation
+```bash
+# Screenshot chaque page
+for route in / /login /signup /dashboard /settings; do
+  name=$(echo $route | tr '/' '-' | sed 's/^-/home/')
+  python .oryn/scripts/pw_check.py "http://localhost:3000${route}" \\
+    --screenshot "/tmp/nav-${name}.png" \\
+    --dump-console
+done
+```
+
+### Tester le responsive
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as pw:
+    browser = pw.chromium.launch(headless=True)
+
+    # Mobile
+    mobile = browser.new_context(viewport={"width": 375, "height": 812})
+    page = mobile.new_page()
+    page.goto("http://localhost:3000")
+    page.screenshot(path="/tmp/mobile.png")
+
+    # Tablet
+    tablet = browser.new_context(viewport={"width": 768, "height": 1024})
+    page = tablet.new_page()
+    page.goto("http://localhost:3000")
+    page.screenshot(path="/tmp/tablet.png")
+
+    # Desktop
+    desktop = browser.new_context(viewport={"width": 1440, "height": 900})
+    page = desktop.new_page()
+    page.goto("http://localhost:3000")
+    page.screenshot(path="/tmp/desktop.png")
+
+    browser.close()
+```
+
+### Vérifier les erreurs console
+```bash
+# Si --dump-console affiche des lignes [error], c'est un bug à fixer
+python .oryn/scripts/pw_check.py http://localhost:3000 --dump-console 2>&1 | grep -i error
+```
+
+## Sélecteurs — comment cibler les éléments
+
+| Type | Exemple | Quand l'utiliser |
+|------|---------|------------------|
+| Texte | `text=Sign In` | Boutons, liens avec texte visible |
+| CSS | `button.submit` | Quand la classe est stable |
+| Attribut | `input[name=email]` | Formulaires |
+| Rôle | `role=button >> text=Save` | Accessibilité |
+| Data-testid | `[data-testid=login-btn]` | Quand rien d'autre ne marche |
+| Placeholder | `input[placeholder=Email]` | Inputs avec placeholder |
+
+## Tips
+- `--wait 3000` si la page met du temps à charger (animations, API calls)
+- `--dump-console` TOUJOURS pour voir les erreurs JS
+- Si un click ne marche pas, vérifie que l'élément est visible (`--dump-html`)
+- Les screenshots sont en pleine page par défaut (scroll complet)
+"""
+
+
 def install_guides(workdir: Path) -> None:
-    """Installe les guides de coding dans .oryn/guides/."""
+    """Installe les guides dans .oryn/guides/."""
     guides_dir = workdir / ".oryn" / "guides"
     guides_dir.mkdir(parents=True, exist_ok=True)
 
     (guides_dir / "coding-patterns.md").write_text(CODING_PATTERNS_GUIDE)
     (guides_dir / "ui-ux-quality.md").write_text(UI_UX_GUIDE)
     (guides_dir / "design-system-compliance.md").write_text(DESIGN_SYSTEM_GUIDE)
+    (guides_dir / "playwright.md").write_text(PLAYWRIGHT_GUIDE)

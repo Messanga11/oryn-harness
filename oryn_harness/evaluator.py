@@ -459,11 +459,36 @@ Ce sont des FAITS. Utilise-les pour ton évaluation.
 - [ ] Blocks CMS dans BLOCK_REGISTRY
 
 # Ta mission
-1. LIS `.oryn/guides/coding-patterns.md` et `.oryn/guides/ui-ux-quality.md`
-2. LIS les screenshots capturés (si disponibles)
-3. Analyse les logs et erreurs ci-dessus
-4. Vérifie CHAQUE critère du contrat
-5. Vérifie l'architecture + design system compliance
+1. LIS `.oryn/guides/playwright.md` pour savoir comment utiliser Playwright
+2. LIS les screenshots dans `.oryn/evidence/` capturés par le harness
+3. **TESTE TOI-MÊME avec Playwright** — le harness a capturé des screenshots mais TU DOIS
+   aussi tester interactivement. Utilise `.oryn/scripts/pw_check.py` :
+   ```bash
+   # Tester chaque page du sprint avec console logs
+   python .oryn/scripts/pw_check.py http://localhost:{stack.web_port}/login --screenshot /tmp/eval_login.png --dump-console
+
+   # Remplir un formulaire et voir ce qui se passe
+   python .oryn/scripts/pw_check.py http://localhost:{stack.web_port}/login \\
+     --fill "input[name=email]" "test@example.com" \\
+     --click "button[type=submit]" \\
+     --wait 3000 \\
+     --screenshot /tmp/eval_after_submit.png \\
+     --dump-console
+
+   # Tester le responsive (mobile viewport)
+   python3 -c "
+   from playwright.sync_api import sync_playwright
+   with sync_playwright() as pw:
+       browser = pw.chromium.launch(headless=True)
+       ctx = browser.new_context(viewport={{'width': 375, 'height': 812}})
+       page = ctx.new_page()
+       page.goto('http://localhost:{stack.web_port}')
+       page.screenshot(path='/tmp/eval_mobile.png')
+       browser.close()
+   "
+   ```
+4. Analyse les logs et erreurs (serveur, console browser, logcat)
+5. Vérifie CHAQUE critère du contrat
 6. **Vérifie la qualité du code** :
    - Compound components là où c'est pertinent ?
    - Error boundaries en place ?
@@ -480,6 +505,7 @@ Ce sont des FAITS. Utilise-les pour ton évaluation.
 8. **Design system violations** : regarde le score ESLint forbid-elements ci-dessus
 9. Écris ta critique dans `.oryn/critiques/sprint_{sprint.id}_iter_{iteration:03d}.md`
 10. Si l'app crash au lancement → NEEDS_FIX immédiat
+11. Si des erreurs JS dans la console browser → cite-les exactement
 
 # Output OBLIGATOIRE
 ```

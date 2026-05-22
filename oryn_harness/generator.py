@@ -301,6 +301,7 @@ AVANT TOUT, lis ces fichiers de référence :
 1. `.oryn/guides/coding-patterns.md` — patterns senior dev
 2. `.oryn/guides/ui-ux-quality.md` — standards UI/UX
 3. `.oryn/guides/design-system-compliance.md` — règles du design system
+4. `.oryn/guides/playwright.md` — comment tester avec Playwright (screenshots, console, formulaires)
 
 # ÉTAPE 1 : RECHERCHE (OBLIGATOIRE avant de coder)
 Utilise WebSearch pour chercher la doc des technologies de ce sprint :
