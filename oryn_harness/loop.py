@@ -192,8 +192,12 @@ class HarnessLoop:
         sprint.status = SprintStatus.IN_PROGRESS
         self.state.write_progress(progress)
 
-        # Phase 1 : négociation contrat
-        self.negotiator.negotiate(sprint, max_rounds=10)
+        # Phase 1 : négociation contrat (skip si déjà négocié)
+        contract = self.state.read_contract(sprint.id)
+        if contract:
+            console.print(f"[dim]Contrat sprint {sprint.id} déjà existant, skip négociation[/dim]")
+        else:
+            self.negotiator.negotiate(sprint, max_rounds=10)
 
         # Phase 2 : loop generator ⇄ evaluator
         consecutive_fails = 0
