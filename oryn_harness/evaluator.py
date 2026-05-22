@@ -556,13 +556,22 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
                     # Fallback : URLs par défaut + sprint-aware
                     urls_to_check = [{"name": "home", "url": get_web_base_url(self.config.workdir)}]
 
+                browser_console: dict[str, str] = {}
                 for url_info in urls_to_check:
                     name = url_info.get("name", "page")
                     url = url_info.get("url", get_web_base_url(self.config.workdir))
                     path = evidence_dir / f"eval_{sprint.id}_{name}.png"
-                    self._playwright_screenshot(url, str(path))
+                    console_output = self._playwright_screenshot_with_console(url, str(path))
                     if path.exists():
                         evidence["web"]["screenshots"].append(str(path))
+                    if console_output:
+                        browser_console[name] = console_output
+                evidence["web"]["browser_console"] = browser_console
+
+        # Server logs dans l'evidence web
+        if web_svc:
+            evidence["web"]["server_logs"] = web_svc.logs[-2000:]
+            evidence["web"]["server_errors"] = web_svc.errors[:10]
 
         # Mobile
         android_svc = services.get("android")
@@ -575,6 +584,16 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
                 "logs": expo_svc.logs if expo_svc else "",
                 "errors": (android_svc.errors if android_svc else []) + (expo_svc.errors if expo_svc else []),
             }
+            # Logcat Android
+            if android_svc and android_svc.running:
+                try:
+                    proc = subprocess.run(
+                        ["adb", "logcat", "-d", "-s", "ReactNativeJS:*", "ReactNative:*"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    evidence["mobile"]["logcat"] = proc.stdout[-2000:]
+                except Exception:
+                    pass
 
         # Convex
         convex_svc = services.get("convex")
@@ -643,18 +662,19 @@ SCORES_JSON: {{"design": 0-10, "originality": 0-10, "craft": 0-10, "functionalit
             pass
         return result
 
-    def _playwright_screenshot(self, url: str, output: str) -> None:
+    def _playwright_screenshot_with_console(self, url: str, output: str) -> str:
+        """Screenshot + capture console logs du browser. Retourne les logs."""
         script = self.config.workdir / ".oryn" / "scripts" / "pw_check.py"
         if not script.exists():
-            return
+            return ""
         try:
-            import subprocess
-            subprocess.run(
-                ["python3", str(script), url, "--screenshot", output],
+            proc = subprocess.run(
+                ["python3", str(script), url, "--screenshot", output, "--dump-console"],
                 capture_output=True, text=True, timeout=20,
             )
+            return proc.stdout[-2000:] if proc.stdout else ""
         except Exception:
-            pass
+            return ""
 
     def _run_quality_checks(self) -> dict:
         """Lance Biome + ESLint + Knip pour la qualité du code."""
@@ -780,18 +800,31 @@ with sync_playwright() as pw:
             lines.append(f"- Lancée : {'OUI' if web.get('launched') else 'NON'}")
             lines.append(f"- HTTP status : {web.get('http_status', 'N/A')}")
 
-            if web.get("errors"):
-                lines.append("- ERREURS :")
-                for e in web["errors"][:10]:
+            if web.get("server_errors"):
+                lines.append("- ERREURS SERVEUR :")
+                for e in web["server_errors"][:10]:
                     lines.append(f"  - {e[:200]}")
 
-            if web.get("logs"):
-                lines.append("- Logs serveur (dernières lignes) :")
-                lines.append(f"```\n{web['logs'][-1500:]}\n```")
+            if web.get("server_logs"):
+                lines.append("- Logs serveur :")
+                lines.append(f"```\n{web['server_logs'][-1500:]}\n```")
 
-            if web.get("console_home"):
-                lines.append("- Console browser (home) :")
-                lines.append(f"```\n{web['console_home'][-1000:]}\n```")
+            # Console browser par page
+            browser_console = web.get("browser_console", {})
+            if browser_console:
+                lines.append("- Console browser (erreurs JS capturées par page) :")
+                for page, logs in browser_console.items():
+                    error_lines = [l for l in logs.split("\n") if "[error]" in l.lower() or "uncaught" in l.lower() or "failed" in l.lower()]
+                    if error_lines:
+                        lines.append(f"  **{page}** :")
+                        for el in error_lines[:5]:
+                            lines.append(f"    - {el.strip()[:200]}")
+                if not any(
+                    "[error]" in l.lower() or "uncaught" in l.lower()
+                    for logs in browser_console.values()
+                    for l in logs.split("\n")
+                ):
+                    lines.append("  (aucune erreur JS détectée)")
 
         # Mobile
         mobile = evidence.get("mobile", {})
@@ -804,6 +837,15 @@ with sync_playwright() as pw:
                 lines.append("- ERREURS :")
                 for e in mobile["errors"][:10]:
                     lines.append(f"  - {e[:200]}")
+
+            if mobile.get("logcat"):
+                logcat_errors = [l for l in mobile["logcat"].split("\n") if "error" in l.lower() or "fatal" in l.lower()]
+                if logcat_errors:
+                    lines.append("- Erreurs React Native (logcat) :")
+                    for l in logcat_errors[:10]:
+                        lines.append(f"  - {l.strip()[:200]}")
+                else:
+                    lines.append("- Logcat : aucune erreur JS détectée")
 
             if mobile.get("logs"):
                 lines.append("- Logs Expo :")

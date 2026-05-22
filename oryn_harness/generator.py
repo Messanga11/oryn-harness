@@ -159,45 +159,82 @@ class Generator:
         web_svc = services.get("web")
         web_healthy = web_svc.healthy if web_svc else False
 
-        # 3. Screenshots des pages pertinentes au sprint
+        # Capturer les logs de tous les services
+        web_logs = web_svc.logs if web_svc else ""
+        web_errors = web_svc.errors if web_svc else []
+        convex_svc = services.get("convex")
+        convex_logs = convex_svc.logs if convex_svc else ""
+        expo_svc = services.get("expo")
+        expo_logs = expo_svc.logs if expo_svc else ""
+        expo_errors = expo_svc.errors if expo_svc else []
+
+        # 4. Screenshots + console browser logs
         screenshots_taken = []
+        browser_console_logs: dict[str, str] = {}
         if web_healthy:
             urls = self._get_sprint_urls(sprint)
-            console.print(f"  [blue]  Taking screenshots: {len(urls)} pages[/blue]")
+            console.print(f"  [blue]  Taking screenshots + console logs: {len(urls)} pages[/blue]")
 
             pw_script = self.config.workdir / ".oryn" / "scripts" / "pw_check.py"
             if pw_script.exists():
                 for name, url in urls:
                     path = evidence_dir / f"gen_{sprint.id}_{name}.png"
                     try:
-                        subprocess.run(
-                            ["python3", str(pw_script), url, "--screenshot", str(path)],
+                        proc = subprocess.run(
+                            ["python3", str(pw_script), url,
+                             "--screenshot", str(path),
+                             "--dump-console"],
                             capture_output=True, text=True, timeout=20,
                         )
                         if path.exists():
                             screenshots_taken.append((name, str(path)))
                             console.print(f"    [green]  {name} → {path.name}[/green]")
-                        else:
-                            console.print(f"    [yellow]  {name} → screenshot failed[/yellow]")
+                        # Capturer les logs console du browser
+                        if proc.stdout:
+                            browser_console_logs[name] = proc.stdout[-2000:]
+                            # Afficher les erreurs console
+                            for line in proc.stdout.split("\n"):
+                                if "[error]" in line.lower() or "uncaught" in line.lower():
+                                    console.print(f"    [red]  console: {line.strip()[:120]}[/red]")
                     except Exception:
                         console.print(f"    [yellow]  {name} → timeout[/yellow]")
 
-        # 4. Cleanup infra
+        # 5. Logcat Android si émulateur running
+        android_svc = services.get("android")
+        logcat_output = ""
+        if android_svc and android_svc.running:
+            try:
+                proc = subprocess.run(
+                    ["adb", "logcat", "-d", "-s", "ReactNativeJS:*", "ReactNative:*"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                logcat_output = proc.stdout[-3000:]
+            except Exception:
+                pass
+
+        # 6. Cleanup infra
         infra.stop_all()
 
-        # 5. Écrire le rapport du Generator dans .oryn/evidence/
+        # 7. Écrire le rapport complet
         report = {
             "sprint_id": sprint.id,
             "build_ok": True,
             "web_healthy": web_healthy,
-            "android_running": services.get("android", type("", (), {"running": False})).running,
-            "convex_running": services.get("convex", type("", (), {"running": False})).running,
+            "web_logs": web_logs[-2000:],
+            "web_errors": web_errors[:10],
+            "browser_console_logs": browser_console_logs,
+            "convex_logs": convex_logs[-1500:],
+            "expo_logs": expo_logs[-1500:],
+            "expo_errors": expo_errors[:10],
+            "logcat": logcat_output[-2000:],
+            "android_running": android_svc.running if android_svc else False,
+            "convex_running": convex_svc.running if convex_svc else False,
             "test_output": test_output,
             "screenshots": [{"name": n, "path": p} for n, p in screenshots_taken],
             "urls_tested": [{"name": n, "url": u} for n, u in self._get_sprint_urls(sprint)],
         }
         report_path = evidence_dir / f"gen_{sprint.id}_report.json"
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
 
         console.print(
             f"[bold]  Résumé: web={'✓' if web_healthy else '✗'} "
@@ -338,7 +375,12 @@ TEST_INSTRUCTIONS_FOR_EVALUATOR:
         test_failures = ""
         build_errors = ""
 
-        # Test output du dernier run
+        # Lire le rapport complet du dernier post-build
+        web_logs = ""
+        browser_errors = ""
+        expo_errors_str = ""
+        logcat_errors = ""
+
         report_path = evidence_dir / f"gen_{sprint.id}_report.json"
         if report_path.exists():
             try:
@@ -348,6 +390,27 @@ TEST_INSTRUCTIONS_FOR_EVALUATOR:
                 test_output = report.get("test_output", "")
                 if test_output and "fail" in test_output.lower():
                     test_failures = test_output
+
+                # Logs du serveur web
+                if report.get("web_errors"):
+                    web_logs = "\n".join(report["web_errors"][:10])
+
+                # Logs console du browser (erreurs JS)
+                for page, logs in report.get("browser_console_logs", {}).items():
+                    for line in logs.split("\n"):
+                        if "[error]" in line.lower() or "uncaught" in line.lower() or "failed" in line.lower():
+                            browser_errors += f"  [{page}] {line.strip()}\n"
+
+                # Expo errors
+                if report.get("expo_errors"):
+                    expo_errors_str = "\n".join(report["expo_errors"][:10])
+
+                # Logcat errors (React Native)
+                logcat = report.get("logcat", "")
+                if logcat:
+                    for line in logcat.split("\n"):
+                        if "error" in line.lower() or "fatal" in line.lower():
+                            logcat_errors += f"  {line.strip()}\n"
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -375,7 +438,36 @@ Résultats de `pnpm turbo test` :
 {test_failures[:3000]}
 ```
 FIXE CHAQUE TEST QUI FAIL. Lis le message d'erreur, trouve le fichier, corrige le code.
-Ne dis PAS "tout est PASS" si des tests fail — le harness les a EXÉCUTÉS et ils échouent.
+"""
+        if web_logs:
+            concrete_problems += f"""
+# 🌐 ERREURS SERVEUR WEB
+Logs du serveur web :
+```
+{web_logs[:1500]}
+```
+"""
+        if browser_errors:
+            concrete_problems += f"""
+# 🖥 ERREURS CONSOLE BROWSER
+Erreurs JS capturées dans le navigateur par page :
+```
+{browser_errors[:2000]}
+```
+"""
+        if expo_errors_str:
+            concrete_problems += f"""
+# 📱 ERREURS EXPO / METRO BUNDLER
+```
+{expo_errors_str[:1500]}
+```
+"""
+        if logcat_errors:
+            concrete_problems += f"""
+# 📱 ERREURS REACT NATIVE (logcat Android)
+```
+{logcat_errors[:1500]}
+```
 """
 
         return f"""Tu itères sur le sprint **{sprint.id} — {sprint.title}** (itération {iteration}).
