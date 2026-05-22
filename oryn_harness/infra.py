@@ -13,6 +13,7 @@ Chaque service a un pattern : start → wait_ready → health_check → evidence
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -201,9 +202,9 @@ class InfraManager:
     # -------------------------------------------------------------------------
 
     def _start_web(self) -> ServiceStatus:
-        """Lance le serveur web sur le port fixe et vérifie qu'il répond."""
-        status = ServiceStatus(name="web", port=self._web_port, url=self.web_base_url)
-        console.print(f"[blue]Starting web server on port {self._web_port}...[/blue]")
+        """Lance le serveur web et détecte le port RÉEL depuis sa sortie."""
+        status = ServiceStatus(name="web")
+        console.print("[blue]Starting web server...[/blue]")
 
         web_dir = self.workdir / "apps" / "web"
 
@@ -226,22 +227,37 @@ class InfraManager:
             status.errors.append("pnpm not found")
             return status
 
-        # Attendre le serveur (max 30s) + détecter le port
+        # Attendre le serveur (max 30s)
         status = self._wait_for_output(
             proc, status,
-            ready_keywords=["ready", "listening", "localhost:", "started", "http://", "port"],
-            error_keywords=["error", "failed", "eaddrinuse"],
+            ready_keywords=["ready", "listening", "localhost:", "started", "http://", "port", "Local:"],
+            error_keywords=["failed", "eaddrinuse"],
             timeout=30,
         )
 
-        # Health check HTTP sur le port configuré
+        # Lire le port RÉEL depuis les logs du serveur
+        # Le serveur affiche "http://localhost:5173/" ou "Local: http://localhost:3000/"
+        real_port = self._web_port  # fallback sur la config
+        for line in status.logs.split("\n"):
+            match = re.search(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)', line)
+            if match:
+                real_port = int(match.group(1))
+                break
+
+        if real_port != self._web_port:
+            console.print(f"  [yellow]Port réel: {real_port} (config: {self._web_port})[/yellow]")
+        self._web_port = real_port
+        status.port = real_port
+        status.url = self.web_base_url
+
+        # Health check HTTP sur le port RÉEL
         if status.running:
             status.healthy = self._http_health_check(self.web_base_url, retries=5, delay=2)
             if status.healthy:
-                console.print("[green]  Web server healthy (HTTP 200)[/green]")
+                console.print(f"[green]  Web server healthy on {self.web_base_url}[/green]")
             else:
-                status.errors.append("Web server running but HTTP check failed")
-                console.print("[yellow]  Web server running but HTTP check failed[/yellow]")
+                status.errors.append(f"Web server running but HTTP check failed on {self.web_base_url}")
+                console.print(f"[yellow]  Web server HTTP check failed on {self.web_base_url}[/yellow]")
 
         return status
 
