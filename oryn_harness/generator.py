@@ -91,18 +91,50 @@ class Generator:
         return result
 
     def _verify_and_capture(self, sprint: Sprint, gen_result: ClaudeResult) -> None:
-        """Après le coding, vérifie l'infra et capture les preuves pour le Reviewer."""
-        console.print("[bold]Post-build : vérification infra + screenshots[/bold]")
+        """Après le coding, vérifie compilation + infra et capture les preuves."""
+        console.print("[bold]Post-build : compilation → tests → infra → screenshots[/bold]")
 
         evidence_dir = self.config.workdir / ".oryn" / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Lancer l'infra
-        infra = InfraManager(self.config.workdir)
-        services = infra.start_all()
+        # 1. COMPILATION — doit passer avant tout
+        console.print("[blue]  TypeScript compilation check...[/blue]")
+        build_output = ""
+        build_ok = False
+        try:
+            proc = subprocess.run(
+                ["pnpm", "turbo", "build"],
+                cwd=str(self.config.workdir),
+                capture_output=True, text=True, timeout=180,
+            )
+            build_output = proc.stdout[-3000:] + "\n" + proc.stderr[-1000:]
+            build_ok = proc.returncode == 0
+            if build_ok:
+                console.print("[green]  Build: PASS[/green]")
+            else:
+                console.print("[red]  Build: FAIL — le projet ne compile pas[/red]")
+                # Écrire les erreurs pour que le Generator puisse les lire au prochain tour
+                (evidence_dir / f"gen_{sprint.id}_build_errors.txt").write_text(build_output)
+        except Exception as e:
+            build_output = str(e)
+            console.print(f"[red]  Build: {e}[/red]")
 
-        web_svc = services.get("web")
-        web_healthy = web_svc.healthy if web_svc else False
+        # Si ça ne compile pas → pas la peine de continuer
+        if not build_ok:
+            report = {
+                "sprint_id": sprint.id,
+                "build_ok": False,
+                "build_errors": build_output[-3000:],
+                "web_healthy": False,
+                "android_running": False,
+                "convex_running": False,
+                "test_output": "",
+                "screenshots": [],
+                "urls_tested": [],
+            }
+            (evidence_dir / f"gen_{sprint.id}_report.json").write_text(json.dumps(report, indent=2))
+            console.print("[red]  Le projet ne compile pas — le Reviewer va demander un fix[/red]")
+            return
 
         # 2. Unit tests
         console.print("[blue]  Running unit tests...[/blue]")
@@ -119,6 +151,13 @@ class Generator:
         except Exception as e:
             test_output = str(e)
             console.print(f"  [yellow]  Tests: {e}[/yellow]")
+
+        # 3. Lancer l'infra
+        infra = InfraManager(self.config.workdir)
+        services = infra.start_all()
+
+        web_svc = services.get("web")
+        web_healthy = web_svc.healthy if web_svc else False
 
         # 3. Screenshots des pages pertinentes au sprint
         screenshots_taken = []
@@ -149,6 +188,7 @@ class Generator:
         # 5. Écrire le rapport du Generator dans .oryn/evidence/
         report = {
             "sprint_id": sprint.id,
+            "build_ok": True,
             "web_healthy": web_healthy,
             "android_running": services.get("android", type("", (), {"running": False})).running,
             "convex_running": services.get("convex", type("", (), {"running": False})).running,

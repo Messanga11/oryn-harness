@@ -390,6 +390,27 @@ class Evaluator:
         # Construire le rapport de preuves pour l'Evaluator
         evidence_report = self._build_evidence_report(evidence)
 
+        # Check si le projet compile (le Generator a déjà vérifié)
+        gen_report_path = self.config.workdir / ".oryn" / "evidence" / f"gen_{sprint.id}_report.json"
+        if gen_report_path.exists():
+            try:
+                gen_report = json.loads(gen_report_path.read_text())
+                if not gen_report.get("build_ok", True):
+                    console.print("[red]Le projet ne compile pas — NEEDS_FIX automatique[/red]")
+                    build_errors = gen_report.get("build_errors", "")
+                    # Écrire une critique automatique
+                    critique = f"# Critique sprint {sprint.id} iter {iteration}\n\nLE PROJET NE COMPILE PAS.\n\nBuild errors:\n```\n{build_errors[:3000]}\n```\n\nFix les erreurs de compilation avant toute chose.\n"
+                    self.state.write_critique(sprint.id, iteration, critique)
+                    infra.stop_all()
+                    return "NEEDS_FIX", None, ClaudeResult(
+                        text=f"SPRINT_ID: {sprint.id}\nVERDICT: NEEDS_FIX\nSCORES_JSON: {{}}",
+                        raw_stdout="", raw_stderr="Build failed",
+                        cost_usd=0.0, duration_ms=0, num_turns=0,
+                        session_id=None, success=False,
+                    )
+            except (json.JSONDecodeError, OSError):
+                pass
+
         # Phase 2 : L'Evaluator Claude analyse les preuves
         console.print("[bold]Phase 2 : Analyse par l'Evaluator[/bold]")
 
