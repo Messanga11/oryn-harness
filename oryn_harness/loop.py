@@ -201,8 +201,6 @@ class HarnessLoop:
 
         # Phase 2 : loop generator ⇄ evaluator
         consecutive_fails = 0
-        last_gen_hash = ""
-        stale_count = 0
 
         for iteration in range(self.config.max_iterations_per_sprint):
             if self._budget_exceeded(progress):
@@ -220,20 +218,6 @@ class HarnessLoop:
             if "RESTART_REQUESTED" in gen_result.text:
                 self._handle_restart(sprint, progress, reason="generator requested")
                 return
-
-            # Détecter si le Generator tourne en rond (même output)
-            gen_hash = hash(gen_result.text[:500])
-            if gen_hash == last_gen_hash:
-                stale_count += 1
-                if stale_count >= 2:
-                    console.print(f"[yellow]Generator ne fait plus de progrès ({stale_count}x même output) → PASS forcé[/yellow]")
-                    sprint.status = SprintStatus.PASSED
-                    sprint.notes.append(f"iter {iteration}: AUTO-PASS (generator stale)")
-                    self.state.write_progress(progress)
-                    return
-            else:
-                stale_count = 0
-            last_gen_hash = gen_hash
 
             # Evaluator
             verdict, scores, eval_result = self.evaluator.evaluate(

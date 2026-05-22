@@ -333,26 +333,70 @@ TEST_INSTRUCTIONS_FOR_EVALUATOR:
 """
 
     def _fix_iteration_prompt(self, sprint, iteration, stack, apps_section, lessons_section) -> str:
+        # Lire les résultats concrets du dernier post-build
+        evidence_dir = self.config.workdir / ".oryn" / "evidence"
+        test_failures = ""
+        build_errors = ""
+
+        # Test output du dernier run
+        report_path = evidence_dir / f"gen_{sprint.id}_report.json"
+        if report_path.exists():
+            try:
+                report = json.loads(report_path.read_text())
+                if not report.get("build_ok", True):
+                    build_errors = report.get("build_errors", "")
+                test_output = report.get("test_output", "")
+                if test_output and "fail" in test_output.lower():
+                    test_failures = test_output
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Build errors file
+        build_err_path = evidence_dir / f"gen_{sprint.id}_build_errors.txt"
+        if build_err_path.exists() and not build_errors:
+            build_errors = build_err_path.read_text()[-3000:]
+
+        # Construire la section des problèmes concrets
+        concrete_problems = ""
+        if build_errors:
+            concrete_problems += f"""
+# ⛔ LE PROJET NE COMPILE PAS
+Erreurs de build exactes :
+```
+{build_errors[:3000]}
+```
+FIXE CES ERREURS EN PRIORITÉ. Rien d'autre ne compte tant que ça ne compile pas.
+"""
+        if test_failures:
+            concrete_problems += f"""
+# ⚠ TESTS QUI ÉCHOUENT
+Résultats de `pnpm turbo test` :
+```
+{test_failures[:3000]}
+```
+FIXE CHAQUE TEST QUI FAIL. Lis le message d'erreur, trouve le fichier, corrige le code.
+Ne dis PAS "tout est PASS" si des tests fail — le harness les a EXÉCUTÉS et ils échouent.
+"""
+
         return f"""Tu itères sur le sprint **{sprint.id} — {sprint.title}** (itération {iteration}).
 {apps_section}
+{concrete_problems}
 
 # CRITIQUE DE L'EVALUATOR
 Lis la critique : `.oryn/critiques/sprint_{sprint.id}_iter_{iteration - 1:03d}.md`
 
-L'Evaluator a LANCÉ les apps et capturé des screenshots + logs.
-Regarde les screenshots dans `.oryn/evidence/` pour voir ce que l'app rend RÉELLEMENT.
+L'Evaluator a LANCÉ les apps (browser + émulateur Android) et capturé des screenshots + logs.
+Les screenshots sont dans `.oryn/evidence/` — regarde-les.
 
 # CE QUE TU DOIS FAIRE
-1. LIS la critique et les screenshots d'evidence
-2. Si erreur de dépendance/config → WebSearch pour la bonne solution
-3. Si crash → lis les logs exacts et fixe la cause racine
-4. Pour chaque critère FAIL → fixe-le
-5. **VÉRIFIE TOI-MÊME** :
-   - `pnpm turbo test` passe ?
-   - L'app web démarre ?
-   - Les pages du sprint rendent correctement ?
+{"1. FIXE LES ERREURS DE COMPILATION CI-DESSUS EN PRIORITÉ" if build_errors else ""}
+{"1. FIXE LES TESTS QUI FAIL CI-DESSUS" if test_failures and not build_errors else ""}
+{"2" if build_errors or test_failures else "1"}. Pour chaque critère FAIL dans la critique → fixe-le
+{"3" if build_errors or test_failures else "2"}. Si erreur de dépendance/config → WebSearch la solution
+{"4" if build_errors or test_failures else "3"}. **VÉRIFIE** : `pnpm turbo build` compile ? `pnpm turbo test` passe ?
+{"5" if build_errors or test_failures else "4"}. L'app web démarre ? L'app mobile build ?
 
-Lis aussi `.oryn/contracts/sprint_{sprint.id}.md` pour rappel.
+Lis `.oryn/contracts/sprint_{sprint.id}.md` pour rappel du contrat.
 {lessons_section}
 Si tu patches la même chose 3 fois → `STATUS: RESTART_REQUESTED`.
 
